@@ -8,6 +8,7 @@ This is an invoice processing demo that integrates Temporal workflows with the M
 
 The repo contains a shared business service (`bizservice/`) and multiple MCP server implementations:
 - `async_mcp/` — Uses MCP Tasks + Elicitation with custom Temporal-backed task handlers
+- `durable_sync_mcp/` — Synchronous tools (no MCP Tasks), designed for Claude Desktop over stdio
 
 ## Repository Structure
 
@@ -20,6 +21,10 @@ async_mcp/               MCP server using Tasks + Elicitation
   client_config.json     MCP client config (Claude Desktop format)
   boot-demo.sh           tmux helper to start server + worker
   tests/                 Tests for task handlers and client
+durable_sync_mcp/        MCP server using synchronous tools (no Tasks)
+  server.py              FastMCP server with individual tools for Claude Desktop
+  claude_desktop_config.json  Sample Claude Desktop config
+  README.md              Setup and usage instructions
 samples/                 Sample invoice JSON files
 docs/                    Design docs, research, and plans
 ```
@@ -102,6 +107,34 @@ Client                          MCP Server                    Temporal
   |                               |<-- "PAID" -----------------|
   |<-- CallToolResult ------------|                            |
   |   (status: PAID)              |                            |
+```
+
+### Sync MCP Server (`durable_sync_mcp/server.py`)
+
+A simpler MCP server where the LLM (Claude Desktop) orchestrates the multi-step invoice flow directly via individual tool calls. No MCP Tasks, no elicitation — the agent decides when to check status, approve, or reject.
+
+**Tools:**
+- `process_invoice` — Starts a Temporal workflow, returns `workflow_id` + `run_id`
+- `approve_invoice` — Signals `ApproveInvoice` on a workflow
+- `reject_invoice` — Signals `RejectInvoice` on a workflow
+- `invoice_status` — Queries `GetInvoiceStatus` + workflow description
+
+**Interaction Flow:**
+```
+Claude Desktop                  MCP Server                    Temporal
+  |                               |                            |
+  |-- tools/call --------------->|                            |
+  |  (process_invoice)            |-- start_workflow --------->|
+  |<-- {workflow_id, run_id} -----|                            |
+  |                               |                            |
+  |-- tools/call --------------->|-- query GetInvoiceStatus ->|
+  |  (invoice_status)             |<-- PENDING-APPROVAL -------|
+  |<-- "PENDING-APPROVAL" -------|                            |
+  |                               |                            |
+  |  (asks user, user says yes)   |                            |
+  |-- tools/call --------------->|-- signal ApproveInvoice -->|
+  |  (approve_invoice)            |                            |
+  |<-- "APPROVED" ---------------|                            |
 ```
 
 ### Task Handlers (`async_mcp/temporal_task_handlers.py`)

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "invoice_processor": {
+      "command": "/REPLACE/WITH/PATH/TO/uv",
+      "args": [
+        "--directory",
+        "/REPLACE/WITH/PATH/TO/durable-async-mcp",
+        "run",
+        "durable_sync_mcp/server.py"
+      ]
+    }
+  }
+}
