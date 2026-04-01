@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "invoice_processor": {
+      "command": "python",
+      "args": ["async_mcp/server.py"],
+      "env": {
+        "TEMPORAL_ADDRESS": "localhost:7233"
+      }
+    }
+  }
+}
