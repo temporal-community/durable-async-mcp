@@ -28,8 +28,8 @@ An MCP server that uses **Tasks** for async execution and **Elicitation** for hu
 ## Setup
 
 ```bash
-git clone https://github.com/Aslan11/temporal-invoice-mcp.git
-cd temporal-invoice-mcp
+git clone https://github.com/temporal-community/durable-async-mcp.git
+cd durable-async-mcp
 uv venv
 source .venv/bin/activate
 uv pip install -e .

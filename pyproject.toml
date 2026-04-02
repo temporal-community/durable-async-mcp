@@ -29,7 +29,7 @@ classifiers = [
 
 dependencies = [
     "temporalio>=1.0.0",
-    "fastmcp>=2.14.0",  # Requires task support (SEP-1686)
+    "fastmcp[tasks]>=2.14.0",  # Requires task support (SEP-1686)
     "openai>=1.0.0",
 ]
 
