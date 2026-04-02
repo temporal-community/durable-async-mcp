@@ -159,7 +159,7 @@ async def handle_tasks_result(
         line_count = len(invoice_data.get("lines", []))
 
         async with fastmcp.server.context.Context(fastmcp=server) as ctx:
-            response = await ctx.elicit(
+            elicit_response = await ctx.elicit(
                 message=(
                     f"Invoice {invoice_id} for {customer} "
                     f"(${total_amount:.2f}) requires approval. "
@@ -169,24 +169,34 @@ async def handle_tasks_result(
                 response_type=["approve", "reject"],
             )
 
-            # Handle elicitation response
-            if response.action in ("cancel", "decline"):
-                await handle.signal(InvoiceWorkflow.RejectInvoice)
-                result = await handle.result()
-                return ServerResult(
-                    _build_terminal_result(task_id, result)
-                )
-
-            decision = response.data.lower() if response.data else "reject"
-            if decision == "reject":
-                await handle.signal(InvoiceWorkflow.RejectInvoice)
-            else:
-                await handle.signal(InvoiceWorkflow.ApproveInvoice)
-
-            result = await handle.result()
+        # Signal the workflow and return. The client cancels this request
+        # after elicitation and resumes polling (per MCP tasks spec).
+        if elicit_response.action in ("cancel", "decline"):
+            await handle.signal(InvoiceWorkflow.RejectInvoice)
             return ServerResult(
-                _build_terminal_result(task_id, result)
+                CallToolResult(
+                    content=[TextContent(type="text", text="Invoice rejected.")],
+                    isError=False,
+                )
             )
+
+        decision = elicit_response.data.lower() if elicit_response.data else "reject"
+        if decision == "reject":
+            await handle.signal(InvoiceWorkflow.RejectInvoice)
+            action_msg = "rejected"
+        else:
+            await handle.signal(InvoiceWorkflow.ApproveInvoice)
+            action_msg = "approved"
+
+        return ServerResult(
+            CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"Invoice {action_msg}. Processing payments...",
+                )],
+                isError=False,
+            )
+        )
 
     # Still working — not ready for result retrieval
     mcp_state = TEMPORAL_TO_MCP_STATE.get(invoice_status, "working")

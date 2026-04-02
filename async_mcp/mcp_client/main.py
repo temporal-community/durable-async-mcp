@@ -29,11 +29,12 @@ SYSTEM_PROMPT = (
     "When a user asks you to process an invoice, use the process_invoice tool. "
     "Invoice JSON should have: invoice_id, customer, and lines "
     "(each with description, amount, due_date in ISO 8601 format). "
-    "When a user asks about open or active invoices, use the list_tasks tool. "
-    "When a user wants to process, approve, or continue an existing invoice "
-    "from the task list, use the resume_task tool with its task ID. "
-    "When a user asks about a specific invoice status and you have a workflow ID, "
-    "use the invoice_status tool."
+    "When a user asks about open, active, or existing invoices, ALWAYS use "
+    "the list_tasks tool — never answer from memory. "
+    "When a user asks about the status of a specific invoice, or wants to "
+    "approve, continue, or interact with an existing invoice, use the "
+    "resume_task tool with its task ID. If you don't have the task ID, "
+    "call list_tasks first to find it."
 )
 
 # Client-side tool exposed to the LLM that maps to the MCP tasks/list protocol.
@@ -42,8 +43,10 @@ LIST_TASKS_TOOL = {
     "type": "function",
     "name": "list_tasks",
     "description": (
-        "List all active invoice processing tasks. Returns task IDs, "
-        "statuses, and status messages for running invoice workflows."
+        "List all active invoice processing tasks. ALWAYS call this tool "
+        "when the user asks about open, active, or existing invoices — "
+        "never answer from memory. Returns task IDs, statuses, and status "
+        "messages for running invoice workflows."
     ),
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
@@ -52,10 +55,10 @@ RESUME_TASK_TOOL = {
     "type": "function",
     "name": "resume_task",
     "description": (
-        "Resume an existing invoice task by its task ID. Polls for status "
-        "and handles approval when the task requires input. Use this when "
-        "the user wants to process, approve, or continue an invoice that "
-        "is already in the system (e.g. from list_tasks results)."
+        "Check status of or resume an existing invoice task by its task ID. "
+        "Use this when the user asks about the status of a specific invoice, "
+        "or wants to approve, continue, or interact with it. Polls the "
+        "current status and handles approval when the task requires input."
     ),
     "parameters": {
         "type": "object",
@@ -76,11 +79,17 @@ def load_config(path: str) -> dict:
         return json.load(f)
 
 
+# Signaled when an elicitation handler completes, so _poll_and_resolve_task
+# can cancel the pending tasks/result request and resume polling (per MCP spec).
+_elicitation_done = asyncio.Event()
+
+
 async def handle_elicitation(message, response_type, params, context):
     """Handle elicitation requests from the MCP server.
 
     Prints the message and any enum choices, prompts the user for input,
-    and returns an ElicitResult.
+    and returns an ElicitResult. Sets _elicitation_done so the polling loop
+    can close the result stream per the MCP tasks spec.
     """
     print(f"\n--- Server needs input ---\n{message}")
 
@@ -102,6 +111,7 @@ async def handle_elicitation(message, response_type, params, context):
             field_responses[field_name] = value.strip()
         except EOFError:
             print("\n  (Input closed, cancelling)")
+            _elicitation_done.set()
             return ElicitResult(action="cancel")
 
     if not field_responses:
@@ -110,9 +120,11 @@ async def handle_elicitation(message, response_type, params, context):
             value = await asyncio.to_thread(input, "  Your response: ")
             field_responses["response"] = value.strip()
         except EOFError:
+            _elicitation_done.set()
             return ElicitResult(action="cancel")
 
     print("--- Input submitted ---\n")
+    _elicitation_done.set()
     return ElicitResult(action="accept", content=field_responses)
 
 
@@ -130,18 +142,36 @@ POLL_INTERVAL = 2  # seconds
 
 
 async def _poll_and_resolve_task(client: Client, task_id: str) -> str:
-    """Poll a task until it leaves 'working' state, then call tasks/result.
+    """Poll a task until terminal, handling elicitation along the way.
 
-    For input_required tasks, tasks/result triggers elicitation on the server.
-    For terminal tasks, tasks/result returns the final outcome.
+    Polls tasks/get until the task leaves 'working' state. When
+    input_required, calls tasks/result (triggers elicitation). Per the MCP
+    spec, after elicitation the client closes the result stream and resumes
+    polling until the task reaches a terminal state.
     """
     print("  [Waiting for task to complete (will prompt if approval needed)...]")
     while True:
         status_result = await client.get_task_status(task_id)
         current = status_result.status
         print(f"  [Polling... status: {current}]")
-        if current in TERMINAL_TASK_STATES or current == "input_required":
+
+        if current in TERMINAL_TASK_STATES:
             break
+
+        if current == "input_required":
+            _elicitation_done.clear()
+            # Launch tasks/result as a background task — triggers elicitation
+            result_task = asyncio.create_task(client.get_task_result(task_id))
+            # Wait for the elicitation handler to complete
+            await _elicitation_done.wait()
+            # Per MCP spec: "Client closes result stream and resumes polling"
+            result_task.cancel()
+            try:
+                await result_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            print("  [Input submitted, resuming polling...]")
+
         await asyncio.sleep(POLL_INTERVAL)
 
     raw_result = await client.get_task_result(task_id)
