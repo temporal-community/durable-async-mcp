@@ -70,3 +70,7 @@ uv run pytest async_mcp/tests/
 2. **Elicitation for human-in-the-loop** -- When approval is needed, the MCP server requests input via elicitation. No separate "approve" or "reject" tools needed.
 
 3. **Temporal for durability** -- The underlying Temporal workflow survives crashes, can wait days for approval, and provides full execution history via Temporal Web UI.
+
+## Acknowledgments
+
+This project was inspired by and forked from [Aslan11/temporal-invoice-mcp](https://github.com/Aslan11/temporal-invoice-mcp).
