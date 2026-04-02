@@ -28,3 +28,7 @@
 }
 
 '{"invoice_id": "INV-100","customer": "ACME Corp","lines": [{"description": "Widget A", "amount": 100, "due_date": "2024-06-30T00:00:00Z"}, {"description": "Widget B", "amount": 200, "due_date": "2024-07-05T00:00:00Z"}, {"description": "Widget C", "amount": 300, "due_date": "2026-07-05T00:00:00Z"}, {"description": "Widget D", "amount": 400, "due_date": "2024-07-05T00:00:00Z"}]}'
+
+please process this invoice: '{"invoice_id": "INV-200","customer": "ACME Corp","lines": [{"description": "Widget A", "amount": 100, "due_date": "2024-06-30T00:00:00Z"}, {"description": "Widget B", "amount": 200, "due_date": "2024-07-05T00:00:00Z"}, {"description": "Widget C", "amount": 300, "due_date": "2026-07-05T00:00:00Z"}, {"description": "Widget D", "amount": 400, "due_date": "2024-07-05T00:00:00Z"}]}'
+
+please process this invoice: '{"invoice_id": "INV-200","customer": "ACME Corp","lines": []}'
