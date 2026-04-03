@@ -59,13 +59,13 @@ By default, Claude Desktop blocks certain MCP tools from being called automatica
 
 1. Open Claude Desktop and go to **Settings** (click your profile icon in the bottom-left, then select **Settings**, or use `Cmd + ,`).
 
-   ![Claude Desktop Settings menu](../assets/claudedesktopsettings.png)
+<img src="../assets/claudedesktopsettings.png" width="200"/>
 
 2. In Settings, navigate to **Connectors** in the left sidebar, then click on **invoice_processor**.
 
 3. Under **Tool permissions**, you'll see all four tools listed. Each tool has three permission options (left to right): auto-allow (checkmark), ask each time (hand), and block (circle with line). Set `approve_invoice` and `reject_invoice` to your preferred permission level — select the **checkmark** to allow Claude to call them automatically, or the **hand** icon if you want Claude to ask for confirmation each time.
 
-   ![invoice_processor tool permissions](../assets/claudedesktopinvoice_processor_config.png)
+<img src="../assets/claudedesktopinvoice_processor_config.png" width="500"/>
 
 ## Running the Demo
 

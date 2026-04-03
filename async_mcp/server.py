@@ -65,35 +65,5 @@ async def process_invoice(invoice: Invoice) -> dict:
         "invoice_id": invoice.invoice_id,
     }
 
-
-# @mcp.tool()
-# async def invoice_status(workflow_id: str) -> Dict:
-#     """Query status of an invoice workflow by Temporal workflow ID.
-
-#     Use this tool when:
-#     - The MCP task ID is lost/unknown but workflow ID is available
-#     - Querying workflow status after the MCP task TTL has expired
-#     - Historical audit queries from external systems
-
-#     For active invoice processing, use tasks/get with the task ID instead.
-#     """
-#     client = await _client()
-#     handle = client.get_workflow_handle(workflow_id=workflow_id)
-
-#     try:
-#         desc = await handle.describe()
-#         status = await handle.query(InvoiceWorkflow.GetInvoiceStatus)
-#         return {
-#             "workflow_id": workflow_id,
-#             "invoice_status": status,
-#             "workflow_status": desc.status.name,
-#         }
-#     except Exception as e:
-#         return {
-#             "workflow_id": workflow_id,
-#             "error": str(e),
-#         }
-
-
 if __name__ == "__main__":
     mcp.run(transport="stdio")

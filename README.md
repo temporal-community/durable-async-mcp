@@ -12,11 +12,11 @@ Start here. The core business logic: an invoice processing workflow with ERP val
 
 ### 2. [`durable_sync_mcp/`](durable_sync_mcp/README.md) — Synchronous MCP Tools
 
-The simplest MCP integration. Four individual tools (`process_invoice`, `approve_invoice`, `reject_invoice`, `invoice_status`) that the LLM orchestrates directly. Designed for **Claude Desktop** over stdio. The agent decides when to check status and when to approve — the MCP server is a thin pass-through to Temporal.
+The simplest MCP integration. Four individual tools (`process_invoice`, `approve_invoice`, `reject_invoice`, `invoice_status`) that the LLM orchestrates directly. Designed for **Claude Desktop** over stdio. The agent decides when to check status and when to approve, likely with human involvement — the MCP server is a thin pass-through to Temporal.
 
 ### 3. [`async_mcp/`](async_mcp/README.md) — MCP Tasks + Elicitation
 
-The most advanced integration. A single `process_invoice` tool using **MCP Tasks** for async execution and **MCP Elicitation** for human-in-the-loop approvals. Custom task handlers map the MCP task lifecycle directly to Temporal workflows (workflow ID = task ID). Includes its own CLI client with concurrent background polling — multiple invoices can process simultaneously with approval prompts queued FIFO.
+The most advanced integration. A single `process_invoice` tool using **MCP Tasks** for async execution and **MCP Elicitation** for human-in-the-loop approvals. Custom task handlers map the MCP task lifecycle directly to Temporal workflows (workflow ID = task ID). Includes its own CLI client with concurrent background polling.
 
 ## Prerequisites
 
@@ -48,6 +48,11 @@ samples/             Sample invoice JSON files
 docs/                Design docs, research, and plans
 ```
 
+## Accompanying materials
+
+Here are slides for the talk given at the MCP Dev Summit NA 2026 <a href="assets/MCP Tasks_ Durable, Asynchronous, and Tricky.pdf">
+<img src="assets/TasksAreDurableStateMachines.png" width="500"/>
+</a>
 ## Acknowledgments
 
 This project was inspired by and forked from [Aslan11/temporal-invoice-mcp](https://github.com/Aslan11/temporal-invoice-mcp).
