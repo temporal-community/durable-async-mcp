@@ -169,33 +169,27 @@ async def handle_tasks_result(
                 response_type=["approve", "reject"],
             )
 
-        # Signal the workflow and return. The client cancels this request
-        # after elicitation and resumes polling (per MCP tasks spec).
+        # Signal the workflow, then block until terminal per MCP spec
+        # (Result Retrieval #3: tasks/result MUST block until terminal).
+        # The client cancels this request after elicitation and resumes
+        # polling — the response from handle.result() goes nowhere, but
+        # the server remains spec-conformant.
         if elicit_response.action in ("cancel", "decline"):
             await handle.signal(InvoiceWorkflow.RejectInvoice)
+            result = await handle.result()
             return ServerResult(
-                CallToolResult(
-                    content=[TextContent(type="text", text="Invoice rejected.")],
-                    isError=False,
-                )
+                _build_terminal_result(task_id, result)
             )
 
         decision = elicit_response.data.lower() if elicit_response.data else "reject"
         if decision == "reject":
             await handle.signal(InvoiceWorkflow.RejectInvoice)
-            action_msg = "rejected"
         else:
             await handle.signal(InvoiceWorkflow.ApproveInvoice)
-            action_msg = "approved"
 
+        result = await handle.result()
         return ServerResult(
-            CallToolResult(
-                content=[TextContent(
-                    type="text",
-                    text=f"Invoice {action_msg}. Processing payments...",
-                )],
-                isError=False,
-            )
+            _build_terminal_result(task_id, result)
         )
 
     # Still working — not ready for result retrieval

@@ -143,7 +143,7 @@ Custom MCP task protocol handlers that replace FastMCP's Docket/Redis layer. The
 
 - **`register_temporal_task_handlers(mcp)`** — Entry point, overwrites 5 request handlers on FastMCP's low-level server
 - **`handle_tasks_get`** — Queries `GetInvoiceStatus` on the Temporal workflow, maps to MCP task state
-- **`handle_tasks_result`** — For terminal states: returns `CallToolResult`. For `PENDING-APPROVAL`: triggers elicitation, signals workflow, awaits result.
+- **`handle_tasks_result`** — For terminal states: returns `CallToolResult`. For `PENDING-APPROVAL`: triggers elicitation, signals workflow, blocks on `handle.result()` until terminal (per MCP spec Result Retrieval #3). The client cancels this request after elicitation and resumes polling; the server coroutine runs to completion with its response discarded.
 - **`handle_tasks_list`** — Lists active invoice workflows via Temporal's `list_workflows`
 - **`handle_tasks_cancel`** — Cancels a running workflow via Temporal's cancel API
 - **`_make_wrapped_call_tool`** — Wraps FastMCP's `CallToolRequest` handler to intercept task-augmented `process_invoice` calls

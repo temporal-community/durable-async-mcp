@@ -43,7 +43,7 @@ Client                          MCP Server                    Temporal
   |                               |                            |
   |-- tools/call (task meta) ---->|                            |
   |  (process_invoice)            |-- start_workflow --------->|
-  |<-- CallToolResult ------------|  (taskId = workflow_id)    |
+  |<-- CreateTaskResult ----------|  (taskId = workflow_id)    |
   |   (taskId, status:working)    |                            |
   |                               |                            |
   |-- tasks/get(taskId) --------->|-- query GetInvoiceStatus ->|
@@ -53,11 +53,19 @@ Client                          MCP Server                    Temporal
   |<-- status:input_required -----|<-- PENDING-APPROVAL -------|
   |                               |                            |
   |-- tasks/result(taskId) ------>|                            |
-  |<-- elicitation: approve? -----|  (ctx.elicit() within      |
+  |<-- elicitation: approve? -----|  (ctx.elicit within        |
   |-- user responds: approve ---->|   tasks/result handler)    |
-  |                               |-- signal ApproveInvoice -->|
-  |                               |-- handle.result() -------->|
-  |                               |<-- "PAID" -----------------|
+  |                               |                            |
+  |  (client cancels request,     |-- signal ApproveInvoice -->|
+  |   resumes polling per spec)   |-- handle.result() -------->|
+  |                               |   (blocks until terminal,  |
+  |-- tasks/get(taskId) --------->|    response discarded)     |
+  |<-- status:working ------------|                            |
+  |                               |                            |
+  |-- tasks/get(taskId) --------->|                            |
+  |<-- status:completed ----------|<-- "PAID" -----------------|
+  |                               |                            |
+  |-- tasks/result(taskId) ------>|                            |
   |<-- CallToolResult ------------|                            |
   |   (status: PAID)              |                            |
 ```
@@ -82,7 +90,7 @@ Elicitation happens inside the `tasks/result` handler when the workflow is in `P
 1. Queries `GetInvoiceData` to get invoice context (customer name, amount, line count)
 2. Calls `ctx.elicit()` with approve/reject options
 3. Signals the workflow based on the response
-4. Awaits the workflow result
+4. Blocks on `await handle.result()` until the workflow reaches a terminal state
 5. Returns a `CallToolResult` with the terminal status
 
 ```python
@@ -93,6 +101,28 @@ response = await ctx.elicit(
 ```
 
 Both `decline` and `cancel` actions map to a workflow rejection signal.
+
+### Client Cancellation After Elicitation
+
+Per the MCP Tasks spec sequence diagram ("Client closes result stream and resumes polling"), the client does **not** wait for the `tasks/result` response after elicitation completes. Instead:
+
+1. Client sends `tasks/result` as a background asyncio task (triggers elicitation on the server)
+2. User provides input (approve/reject), elicitation handler returns `ElicitResult`
+3. Client cancels the background task (`result_task.cancel()`) and resumes polling `tasks/get`
+4. Client polls until the task reaches a terminal state, then calls `tasks/result` again for the final result
+
+The client-side `cancel()` only cancels the Python coroutine — it does **not** send a cancellation message to the server over the MCP protocol. The server-side handler continues running: it signals the workflow, blocks on `await handle.result()`, and eventually returns a `CallToolResult`. The MCP server sends that JSON-RPC response over stdio, but the client has moved on and discards it (the response ID matches a request it no longer tracks).
+
+This is spec-conformant:
+- **Server**: `tasks/result` blocks until terminal (Result Retrieval #3: "MUST block the response until the task reaches a terminal status")
+- **Client**: closes the result stream after elicitation (per the spec's sequence diagram) and retrieves the final result with a second `tasks/result` call after polling finds the terminal state
+
+### Production Considerations
+
+The abandoned server-side coroutine is benign for a demo but has implications at scale:
+- Server resources (the coroutine, the Temporal handle) are held until the workflow completes — could be seconds or days depending on payment due dates
+- Multiple abandoned coroutines can accumulate if the client restarts repeatedly
+- A production implementation should decouple the `tasks/result` handler from the workflow wait — e.g., using a task store (Redis, database, or a Temporal workflow) that a background process updates when workflows complete
 
 ## Error Handling
 
