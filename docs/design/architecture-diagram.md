@@ -62,7 +62,6 @@
 │  │  Queries:                   Signals:                                 │       │
 │  │    GetInvoiceStatus           ApproveInvoice                         │       │
 │  │    GetInvoiceData             RejectInvoice                          │       │
-│  │    IsInvoiceApproved                                                 │       │
 │  │                                                                      │       │
 │  │  State Machine:                                                      │       │
 │  │  INITIALIZING ─> PENDING-VALIDATION ─> PENDING-APPROVAL ─┐          │       │

@@ -139,7 +139,6 @@ The abandoned server-side coroutine is benign for a demo but has implications at
 The `InvoiceWorkflow` exposes three queries:
 - **`GetInvoiceStatus`** — Returns current status string (e.g. `"PENDING-APPROVAL"`)
 - **`GetInvoiceData`** — Returns the original invoice dict (used for elicitation context)
-- **`IsInvoiceApproved`** — Returns approval boolean (raises if not yet decided)
 
 ## Key Dependencies
 
