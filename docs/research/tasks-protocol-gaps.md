@@ -65,6 +65,84 @@ Our `handle_tasks_result` in `temporal_task_handlers.py` (line 191-198) intentio
 
 SEP-2322 ("Multi Round-Trip Requests") proposes a stateless `IncompleteResult` response pattern that would allow `tasks/result` to return without blocking, sending the client back to polling. This would address both the long-lived connection problem and improve resilience to connection failures.
 
+## Gap 3: Elicitation Was Designed Before Tasks — Sequential Reader Breaks Under Concurrent Tasks
+
+### Root Cause
+
+Elicitation and Tasks were designed independently. Elicitation assumes a single-threaded, sequential client: one agent, one conversation, one interaction at a time. When `elicitation/create` arrives, the client handles it and responds before anything else happens. The MCP Python SDK's `_receive_loop` in `mcp/shared/session.py` reflects this assumption — it `await`s `_received_request(responder)` **inline**, blocking the reader until the handler returns:
+
+```python
+# mcp/shared/session.py — the receive loop for server→client requests
+await self._received_request(responder)   # blocks entire read loop
+```
+
+Inside `_received_request`, the elicitation callback is called with `await`:
+
+```python
+# mcp/client/session.py
+case types.ElicitRequest(params=params):
+    with responder:
+        response = await self._elicitation_callback(ctx, params)
+        await responder.respond(client_response)
+```
+
+While the callback runs, the reader loop cannot process any other incoming messages — including responses to other pending client requests.
+
+### Why Tasks Breaks This
+
+Tasks introduces async, multiple concurrent in-flight operations. A Temporal-backed client worker managing N concurrent `TaskTrackerWorkflow`s will have N concurrent `handle_elicitation` activities, each calling `tasks/result` on the shared MCP client. When the server responds to any of these with `elicitation/create`, the reader blocks for the duration of the callback.
+
+If the callback polls for a human decision (which can take minutes), all other pending requests — including `start_task`'s `call_tool` for a different task — sit unread in the receive buffer. Activities time out. Workflows create duplicate server-side work on retry.
+
+This is not a performance problem or a slow-handler problem. It is a concurrency model mismatch: the sequential receive loop was designed for a world where elicitation happens one at a time. Tasks makes concurrent elicitations structurally possible.
+
+### Impact
+
+- Any MCP client implementation that handles Tasks concurrently will hit this if multiple tasks reach `input_required` simultaneously.
+- The issue is in `mcp/shared/session.py` (the base SDK), not in FastMCP. FastMCP could work around it by overriding `_received_request` to dispatch with `anyio.create_task_group().start_soon()`, but hasn't.
+- The blocking is proportional to how long the elicitation handler runs. For LLM clients (seconds), it's invisible. For human-in-the-loop clients (minutes), it's a hard blocker.
+
+### Our Workaround
+
+`_elicitation_handler` in `async_mcp/client_worker/activities.py` checks for a pending decision **once** (~20ms) and either returns the decision or raises immediately. The MCP reader is released after each attempt. Temporal's retry mechanism (capped at 10s backoff) provides the polling cadence — the handler takes brief turns on the reader rather than holding it.
+
+```python
+# Check once, release the reader either way
+decision = await handle.query("get_pending_decision")
+if decision is not None:
+    return ElicitResult(action="accept", content={"value": decision})
+raise RuntimeError("No decision yet; handle_elicitation will retry")
+```
+
+### Proposed Protocol Fix
+
+The MCP SDK should dispatch incoming server→client requests in separate tasks:
+
+```python
+# Instead of: await self._received_request(responder)
+task_group.start_soon(self._received_request, responder)
+```
+
+This is a one-line change in `mcp/shared/session.py` that would make the receive loop non-blocking for all incoming server requests, regardless of how long the handler takes. It is the standard pattern for async request servers and would make elicitation composable with concurrent Tasks.
+
+## Synthesis: These Challenges Are Not Temporal-Specific
+
+The gaps above surface specific MCP protocol design issues, but the underlying challenges are inherent to building any serious MCP Tasks client — Temporal or otherwise. A client built with hand-rolled asyncio, threads, or any other concurrency primitive would face every one of them.
+
+**Sequential reader blocking (Gap 3):** Any concurrent-task client hits this. Without Temporal you'd implement the same check-once-and-retry logic with `asyncio.sleep` loops, `threading.Event`s, or similar. Same problem, more hand-rolled machinery.
+
+**Connection lifetime (Gap 2):** `tasks/result` holding a connection open while a human decides (minutes to hours) is a protocol design issue. Any client needs a strategy: hold it open and risk timeouts, or cancel-and-retry. Temporal's retry mechanism *is* that strategy, but you'd build the same explicit retry loops and backoff logic without it.
+
+**Elicitation routing (the `x-task-id` problem):** The elicitation handler not knowing which task triggered it is a protocol gap. Any concurrent client needs this correlation. Without Temporal you'd still build a dict mapping task IDs to waiting state — you'd just store it in Redis or in-memory rather than implicitly in workflow instance variables.
+
+**Human-in-the-loop durability:** If the process crashes while waiting for approval, how do you recover? Without Temporal you'd build explicit state persistence: write "waiting for approval on task X" to a database on entry, query `tasks/get` on restart to discover in-flight tasks, rebuild in-memory state. Temporal's workflow history *is* that persistence layer.
+
+**At-least-once delivery:** `start_task` creating duplicate server-side workflows on retry is a classic problem. Without Temporal retries you'd still need to handle "my request timed out but the server may have processed it." The fix (deterministic task IDs) is protocol-level regardless of client implementation.
+
+**What Temporal actually provides** is a vocabulary for expressing the solutions cleanly. Signals and queries replace custom pub-sub. Retries replace manual try/except/sleep loops. Workflow history replaces a state database. The per-task state machine is just the workflow definition rather than an explicit FSM with a hand-written persistence layer.
+
+The demo makes this point implicitly — which is its core thesis: the complexity budget for building a correct, durable, recoverable MCP Tasks client is non-trivial whether or not you use Temporal. Temporal lets you spend that budget on the problem rather than the infrastructure.
+
 ## References
 
 - [SEP-1686: Tasks Issue](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1686)

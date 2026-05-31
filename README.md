@@ -16,7 +16,9 @@ The simplest MCP integration. Four individual tools (`process_invoice`, `approve
 
 ### 3. [`async_mcp/`](async_mcp/README.md) — MCP Tasks + Elicitation
 
-The most advanced integration. A single `process_invoice` tool using **MCP Tasks** for async execution and **MCP Elicitation** for human-in-the-loop approvals. Custom task handlers map the MCP task lifecycle directly to Temporal workflows (workflow ID = task ID). Includes its own CLI client with concurrent background polling.
+The most advanced integration. A single `process_invoice` tool using **MCP Tasks** for async execution and **MCP Elicitation** for human-in-the-loop approvals. Custom task handlers map the MCP task lifecycle directly to Temporal workflows (workflow ID = task ID).
+
+The client side uses a **Temporal-based worker** (`async_mcp/client_worker/`) that manages the full MCP task lifecycle durably — one `TaskTrackerWorkflow` per task, with a separate UI process that communicates only through Temporal signals and queries. This eliminates hand-rolled polling loops and makes the client as durable as the server.
 
 ## Prerequisites
 
@@ -43,7 +45,8 @@ Each subdirectory has its own README with detailed instructions for running that
 bizservice/          Temporal workflows, activities, worker, and CLI
 durable_sync_mcp/    MCP server with synchronous tools (Claude Desktop)
 async_mcp/           MCP server using Tasks + Elicitation
-  mcp_client/        CLI client with concurrent background polling
+  client_worker/     Durable Temporal-based client (worker + UI)
+  mcp_client/        Legacy LLM-driven CLI client (OpenAI Responses API)
 samples/             Sample invoice JSON files
 docs/                Design docs, research, and plans
 ```

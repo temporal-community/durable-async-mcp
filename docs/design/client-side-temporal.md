@@ -18,9 +18,13 @@ The MCP Tasks protocol (SEP-1686) defines a multi-step, stateful, client-side pr
    - Call `tasks/result(taskId)` — this opens a connection the server uses to send an elicitation
    - Receive elicitation prompt and schema from the server (over that same connection)
    - Present the prompt to a human and wait for their decision
-   - Return `ElicitResult` to the server via the elicitation handler
+   - Return `ElicitResult` to the server **via the elicitation handler's return value** — the answer travels back over the open `tasks/result` connection, not via a separate call
    - Resume polling `tasks/get`
 4. On terminal state (`completed` / `failed` / `cancelled`): call `tasks/result(taskId)` for the final result
+
+> **Protocol note — `tasks/get` does not include elicitation details.** When `tasks/get` returns `input_required`, it only signals that input is needed — it carries no prompt text or schema. Those details only arrive when the client calls `tasks/result` and the server sends the elicitation request back down the same connection. This means the client cannot know *what* to ask the human until it has called `tasks/result` and received the elicitation message. The `handle_elicitation` activity design accounts for this: the activity calls `tasks/result` first, receives the prompt and schema, signals the workflow with those details, and only then waits for the human's decision.
+
+> **Protocol note — `tasks/result` is called twice per task lifecycle.** (1) During elicitation: the connection stays open, the server sends the elicitation, and the answer travels back via the elicitation handler's `ElicitResult` return value. (2) After polling confirms a terminal state: returns the final `CallToolResult`. These are distinct interactions with different purposes, handled by separate activities (`handle_elicitation` and `get_task_result`).
 
 This is a stateful, multi-step protocol with conditional branches, human-in-the-loop, and potentially long waits. It is a workflow. Implementing it without a workflow abstraction means hand-rolling the state machine imperatively.
 
@@ -319,3 +323,39 @@ The design is transport-agnostic. The `fastmcp.Client` abstraction hides whether
 - **HTTP**: connections have timeouts at client, server, and proxy layers. The activity timeout + retry pattern handles this correctly without any custom reconnection code.
 
 The "one worker per session" constraint applies strictly to stdio (one subprocess = one connection = one session). For HTTP, the worker could in principle serve multiple users since `tasks/get` and `tasks/result` are stateless with respect to the HTTP session — the `task_id` carries all the context.
+
+---
+
+## Implementation Notes: Divergences from Original Design
+
+Building the actual implementation revealed several places where the original design needed revision. These are not fundamental changes to the architecture, but they are important enough to document.
+
+### 1. `activity.info()` is not available inside the elicitation callback
+
+The design assumed `activity.info().workflow_id` would be accessible inside `_elicitation_handler` since the callback runs while the activity is executing. In practice, FastMCP dispatches the `elicitation/create` handler in a new asyncio task that does not inherit Temporal's context variables (stored in `contextvars.ContextVar`). `activity.info()` raises `RuntimeError: Not in activity context`.
+
+**Fix**: `handle_elicitation` stores `mcp_task_id → tracker_workflow_id` in `_active_elicitations: dict[str, str]` before calling `get_task_result`. The server embeds `x-task-id` in the `requestedSchema` (using `ctx.session.elicit_form()` directly rather than `ctx.elicit()`), and `_elicitation_handler` reads it back to do the lookup. No `activity.info()` needed in the handler.
+
+### 2. The MCP session `_receive_loop` blocks on the elicitation callback
+
+The design note "JSON-RPC multiplexing means multiple concurrent activities can use the same `mcp_client` simultaneously" is true for *responses* (which are routed by request ID), but not for *incoming server→client requests* like `elicitation/create`.
+
+The MCP SDK's `_receive_loop` (`mcp/shared/session.py`) awaits `_received_request(responder)` inline — the entire read loop is blocked while the callback runs. Responses to other pending requests (like `start_task`'s `call_tool`) pile up in the receive buffer unread until the callback returns. With a callback that polls for minutes, concurrent `start_task` activities time out and create duplicate server-side workflows.
+
+This is a protocol design gap: Elicitation was designed before Tasks and assumes one interaction at a time. Tasks introduces concurrent in-flight operations that stress the sequential reader model.
+
+**Fix**: `_elicitation_handler` checks `get_pending_decision` **once** (~20ms) and either returns the decision or raises immediately, releasing the reader. Temporal retries `handle_elicitation` — brief turns on the reader rather than holding it indefinitely. `maximum_interval=10s` caps the backoff so the approval is processed within at most 10 seconds of the user deciding.
+
+The proposed SDK fix is a one-line change: `task_group.start_soon(self._received_request, responder)` instead of `await self._received_request(responder)`.
+
+### 3. `_make_wrapped_call_tool` `is_task` detection was broken
+
+The original handler checked `ctx.experimental.is_task` to determine whether a `process_invoice` call was task-augmented. This check always failed (returning `False`), causing all calls to fall through to FastMCP's default task handling (Docket/Redis), which is not configured. FastMCP would hang waiting for Docket — while also creating an InvoiceWorkflow, explaining why "invoices were being created but `start_task` timed out."
+
+**Fix**: The `is_task` guard is removed. Since `process_invoice` has `task=TaskConfig(mode="required")`, all calls to it are task-augmented by definition. The handler always intercepts.
+
+### 4. Cancel-after-elicitation is required but asyncio.create_task was initially unsafe
+
+The design specified cancelling `tasks/result` after elicitation per MCP spec, using `asyncio.create_task`. This was correct in principle but initially broke because `activity.info()` (needed in the handler) wasn't available in the created task — leading to the polling-inline approach that caused the reader-blocking problem.
+
+Once fix #1 eliminated the need for `activity.info()` in the handler, cancel-after-elicitation via `asyncio.create_task` became safe and was restored. `handle_elicitation` now: creates a background task for `get_task_result`, waits for the elicitation event OR task completion, and cancels the task if elicitation was handled — releasing the server connection promptly.

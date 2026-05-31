@@ -159,14 +159,25 @@ async def handle_tasks_result(
         line_count = len(invoice_data.get("lines", []))
 
         async with fastmcp.server.context.Context(fastmcp=server) as ctx:
-            elicit_response = await ctx.elicit(
+            # Use elicit_form directly so we can embed task_id as an extension
+            # field in requestedSchema. The client reads x-task-id to route
+            # the elicitation callback to the correct TaskTrackerWorkflow.
+            elicit_response = await ctx.session.elicit_form(
                 message=(
                     f"Invoice {invoice_id} for {customer} "
                     f"(${total_amount:.2f}) requires approval. "
                     f"Lines: {line_count} items.\n\n"
                     f"Select 'approve' or 'reject':"
                 ),
-                response_type=["approve", "reject"],
+                requestedSchema={
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string", "enum": ["approve", "reject"]},
+                    },
+                    "required": ["value"],
+                    "x-task-id": task_id,
+                },
+                related_request_id=ctx.request_id,
             )
 
         # Signal the workflow, then block until terminal per MCP spec
@@ -181,7 +192,7 @@ async def handle_tasks_result(
                 _build_terminal_result(task_id, result)
             )
 
-        decision = elicit_response.data.lower() if elicit_response.data else "reject"
+        decision = (elicit_response.content or {}).get("value", "reject").lower()
         if decision == "reject":
             await handle.signal(InvoiceWorkflow.RejectInvoice)
         else:
@@ -311,17 +322,9 @@ def _make_wrapped_call_tool(original_handler: Any, server: FastMCP) -> Any:
         if tool_name != "process_invoice":
             return await original_handler(req)
 
-        # Check for task metadata via request context
-        try:
-            ctx = server._mcp_server.request_context
-            is_task = ctx.experimental.is_task
-        except (AttributeError, LookupError):
-            is_task = False
-
-        if not is_task:
-            # Synchronous call — delegate to FastMCP's normal handler
-            return await original_handler(req)
-
+        # process_invoice has task=TaskConfig(mode="required") so all calls are
+        # task calls — always intercept and start the Temporal workflow directly,
+        # bypassing FastMCP's Docket-based task backend.
         # Task-augmented call — start the Temporal workflow and return task stub
         arguments = req.params.arguments or {}
         invoice = arguments.get("invoice", arguments)
