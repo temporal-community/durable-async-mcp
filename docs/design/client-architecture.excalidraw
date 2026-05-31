@@ -6987,7 +6987,7 @@
       "y": 3614,
       "width": 1448,
       "height": 44,
-      "text": "Root cause: mcp/shared/session.py _receive_loop uses `await _received_request(responder)` inline \u2014 one server\u2192client request at a time.\nElicitation (designed pre-Tasks) assumes sequential interactions. Tasks introduces concurrent in-flight operations that expose this constraint.\nSDK fix: `task_group.start_soon(_received_request, responder)` \u2014 one line in the mcp Python SDK.",
+      "text": "SDK implementation gap (not a spec gap): modelcontextprotocol/python-sdk \u2014 mcp/shared/session.py\n_receive_loop dispatches server\u2192client requests with `await _received_request(responder)` inline \u2014 blocking the loop for the handler's full duration.\nThe MCP spec doesn't mandate this; it's an implementation choice. Fix: `task_group.start_soon(_received_request, responder)` \u2014 one line.",
       "fontSize": 12,
       "fontFamily": 3,
       "textAlign": "left",

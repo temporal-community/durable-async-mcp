@@ -336,17 +336,17 @@ The design assumed `activity.info().workflow_id` would be accessible inside `_el
 
 **Fix**: `handle_elicitation` stores `mcp_task_id → tracker_workflow_id` in `_active_elicitations: dict[str, str]` before calling `get_task_result`. The server embeds `x-task-id` in the `requestedSchema` (using `ctx.session.elicit_form()` directly rather than `ctx.elicit()`), and `_elicitation_handler` reads it back to do the lookup. No `activity.info()` needed in the handler.
 
-### 2. The MCP session `_receive_loop` blocks on the elicitation callback
+### 2. The MCP Python SDK `_receive_loop` blocks on the elicitation callback
 
 The design note "JSON-RPC multiplexing means multiple concurrent activities can use the same `mcp_client` simultaneously" is true for *responses* (which are routed by request ID), but not for *incoming server→client requests* like `elicitation/create`.
 
-The MCP SDK's `_receive_loop` (`mcp/shared/session.py`) awaits `_received_request(responder)` inline — the entire read loop is blocked while the callback runs. Responses to other pending requests (like `start_task`'s `call_tool`) pile up in the receive buffer unread until the callback returns. With a callback that polls for minutes, concurrent `start_task` activities time out and create duplicate server-side workflows.
+The MCP Python SDK (`git@github.com:modelcontextprotocol/python-sdk.git`, `mcp/shared/session.py`) awaits `_received_request(responder)` inline — the entire read loop is blocked while the callback runs. Responses to other pending requests (like `start_task`'s `call_tool`) pile up in the receive buffer unread until the callback returns. With a callback that polls for minutes, concurrent `start_task` activities time out and create duplicate server-side workflows.
 
-This is a protocol design gap: Elicitation was designed before Tasks and assumes one interaction at a time. Tasks introduces concurrent in-flight operations that stress the sequential reader model.
+This is not a spec gap — the MCP specification is silent on how the receive loop is implemented. It is an SDK implementation choice that works for single-task sequential interactions (the original use case) but breaks under concurrent Tasks. Elicitation predates Tasks and this code path was never updated for concurrent use.
 
 **Fix**: `_elicitation_handler` checks `get_pending_decision` **once** (~20ms) and either returns the decision or raises immediately, releasing the reader. Temporal retries `handle_elicitation` — brief turns on the reader rather than holding it indefinitely. `maximum_interval=10s` caps the backoff so the approval is processed within at most 10 seconds of the user deciding.
 
-The proposed SDK fix is a one-line change: `task_group.start_soon(self._received_request, responder)` instead of `await self._received_request(responder)`.
+The SDK fix is one line: `task_group.start_soon(self._received_request, responder)` instead of `await self._received_request(responder)`.
 
 ### 3. `_make_wrapped_call_tool` `is_task` detection was broken
 

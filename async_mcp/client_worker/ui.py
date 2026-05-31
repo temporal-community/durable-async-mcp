@@ -117,14 +117,6 @@ async def run_ui(temporal_address: str) -> None:
     click.echo("Commands: submit <file>, list, quit\n")
 
     while True:
-        # Before each prompt, surface any pending approvals
-        try:
-            handled = await _handle_pending_elicitation(client)
-            if handled:
-                click.echo("")
-        except Exception as exc:
-            click.echo(f"  [Warning: elicitation check failed: {exc}]")
-
         try:
             line = await asyncio.to_thread(input, "> ")
         except (EOFError, KeyboardInterrupt):
@@ -162,6 +154,13 @@ async def run_ui(temporal_address: str) -> None:
             else:
                 for t in tasks:
                     click.echo(f"  {t['id']}  {t['status']}")
+            # Surface pending approvals after showing task list
+            try:
+                handled = await _handle_pending_elicitation(client)
+                if handled:
+                    click.echo("")
+            except Exception as exc:
+                click.echo(f"  [Warning: elicitation check failed: {exc}]")
 
         else:
             click.echo(f"  Unknown command: {cmd!r}")

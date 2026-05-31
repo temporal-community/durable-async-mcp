@@ -65,18 +65,22 @@ Our `handle_tasks_result` in `temporal_task_handlers.py` (line 191-198) intentio
 
 SEP-2322 ("Multi Round-Trip Requests") proposes a stateless `IncompleteResult` response pattern that would allow `tasks/result` to return without blocking, sending the client back to polling. This would address both the long-lived connection problem and improve resilience to connection failures.
 
-## Gap 3: Elicitation Was Designed Before Tasks — Sequential Reader Breaks Under Concurrent Tasks
+## Gap 3: Elicitation Was Designed Before Tasks — Concurrent Tasks Expose a Python SDK Implementation Limitation
 
-### Root Cause
+### Note on "gap"
 
-Elicitation and Tasks were designed independently. Elicitation assumes a single-threaded, sequential client: one agent, one conversation, one interaction at a time. When `elicitation/create` arrives, the client handles it and responds before anything else happens. The MCP Python SDK's `_receive_loop` in `mcp/shared/session.py` reflects this assumption — it `await`s `_received_request(responder)` **inline**, blocking the reader until the handler returns:
+The MCP *specification* is silent on how the receive loop is implemented — it defines protocol messages, not runtime behavior. This is therefore not a spec gap but an **implementation gap in the MCP Python SDK** (`git@github.com:modelcontextprotocol/python-sdk.git`). A spec-compliant implementation could handle this correctly; the current Python SDK implementation happens not to.
+
+### The Implementation Issue
+
+The MCP Python SDK's `_receive_loop` in `mcp/shared/session.py` dispatches incoming server→client requests (like `elicitation/create`) inline with `await`:
 
 ```python
-# mcp/shared/session.py — the receive loop for server→client requests
+# modelcontextprotocol/python-sdk — mcp/shared/session.py
 await self._received_request(responder)   # blocks entire read loop
 ```
 
-Inside `_received_request`, the elicitation callback is called with `await`:
+Inside `_received_request`, the elicitation callback is also called with `await`:
 
 ```python
 # mcp/client/session.py
@@ -86,20 +90,20 @@ case types.ElicitRequest(params=params):
         await responder.respond(client_response)
 ```
 
-While the callback runs, the reader loop cannot process any other incoming messages — including responses to other pending client requests.
+While the callback runs, the reader loop cannot process any other incoming messages — including responses to other pending client requests. This is an implementation choice, not a protocol requirement.
 
-### Why Tasks Breaks This
+### Why Concurrent Tasks Surface This
 
 Tasks introduces async, multiple concurrent in-flight operations. A Temporal-backed client worker managing N concurrent `TaskTrackerWorkflow`s will have N concurrent `handle_elicitation` activities, each calling `tasks/result` on the shared MCP client. When the server responds to any of these with `elicitation/create`, the reader blocks for the duration of the callback.
 
 If the callback polls for a human decision (which can take minutes), all other pending requests — including `start_task`'s `call_tool` for a different task — sit unread in the receive buffer. Activities time out. Workflows create duplicate server-side work on retry.
 
-This is not a performance problem or a slow-handler problem. It is a concurrency model mismatch: the sequential receive loop was designed for a world where elicitation happens one at a time. Tasks makes concurrent elicitations structurally possible.
+This is not a performance problem or a slow-handler problem. It is a concurrency model mismatch: the sequential inline dispatch was written assuming one interaction at a time. Elicitation predates Tasks; when Tasks was added, this assumption was not revisited.
 
 ### Impact
 
 - Any MCP client implementation that handles Tasks concurrently will hit this if multiple tasks reach `input_required` simultaneously.
-- The issue is in `mcp/shared/session.py` (the base SDK), not in FastMCP. FastMCP could work around it by overriding `_received_request` to dispatch with `anyio.create_task_group().start_soon()`, but hasn't.
+- FastMCP builds on top of the Python SDK and inherits this behavior. FastMCP could work around it by overriding `_received_request` to dispatch with `anyio.create_task_group().start_soon()`, but hasn't.
 - The blocking is proportional to how long the elicitation handler runs. For LLM clients (seconds), it's invisible. For human-in-the-loop clients (minutes), it's a hard blocker.
 
 ### Our Workaround
@@ -114,16 +118,35 @@ if decision is not None:
 raise RuntimeError("No decision yet; handle_elicitation will retry")
 ```
 
-### Proposed Protocol Fix
+### Proposed SDK Fix
 
-The MCP SDK should dispatch incoming server→client requests in separate tasks:
+**PR in progress**: [modelcontextprotocol/python-sdk#2490](https://github.com/modelcontextprotocol/python-sdk/pull/2490) — open as of 2026-05-31.
 
-```python
-# Instead of: await self._received_request(responder)
-task_group.start_soon(self._received_request, responder)
-```
+The PR introduces an opt-in `_dispatch_requests_concurrently` flag on `BaseSession`. When set, request handlers are spawned with `task_group.start_soon()` instead of being awaited inline. `ClientSession` enables this flag (parallel execution), while `ServerSession` keeps it off to preserve its initialization state machine ordering.
 
-This is a one-line change in `mcp/shared/session.py` that would make the receive loop non-blocking for all incoming server requests, regardless of how long the handler takes. It is the standard pattern for async request servers and would make elicitation composable with concurrent Tasks.
+The change is more involved than a one-line swap: concurrent dispatch exposed two race conditions in `RequestResponder` that the PR also fixes — a cancel-before-enter race and an idempotent cancellation issue. Handler exceptions are also now caught and translated to JSON-RPC error responses rather than terminating the session.
+
+The net effect for our use case: `ClientSession` (which is what `fastmcp.Client` uses) gets non-blocking dispatch of incoming server→client requests. `_elicitation_handler` can poll for minutes without blocking other in-flight requests.
+
+### Impact on Our Design If the SDK Is Fixed
+
+The raise-and-retry pattern in `_elicitation_handler` is a workaround for this SDK limitation. With the fix, `_elicitation_handler` can poll with `asyncio.sleep(0.5)` for as long as needed without starving other activities — the original intended design.
+
+**What stays the same:**
+- `_active_elicitations` dict still required — FastMCP still dispatches the handler in a new asyncio task, so `activity.info()` is still unavailable there; routing via `x-task-id` still needed
+- Cancel-after-elicitation still needed — `handle_elicitation` still shouldn't hold the `tasks/result` connection open waiting for the full InvoiceWorkflow to complete
+- `start_to_close_timeout` on `handle_elicitation` still appropriate — HTTP connection timeouts and worker crashes can still interrupt a long-running activity; on retry, the decision is already in `_pending_decision` and the handler finds it immediately
+
+**What changes:**
+- The `raise RuntimeError("No decision yet")` pattern and `maximum_interval` retry cap become unnecessary
+- The handler simplifies back to a polling loop
+- The `handle_elicitation` activity runs for potentially minutes rather than failing fast and retrying
+
+**Demo impact:**
+
+The raise-and-retry pattern is currently one of the more visible demonstrations of Temporal's retry model solving a real concurrent systems problem — the workflow history shows the cadence clearly, and it makes the "Temporal handles polling for free" story concrete. With the SDK fix, this specific demonstration point softens: the activity runs quietly for minutes, and the retry story only surfaces for less-common cases like connection failures or worker crashes.
+
+The core Temporal advantages — zero-cost crash recovery, multi-UI signaling, no custom task registry, no reconnection logic, observable workflow state — are unaffected by the SDK fix. The raise-and-retry pattern was a workaround exhibiting Temporal's strengths; those strengths exist independently of it.
 
 ## Synthesis: These Challenges Are Not Temporal-Specific
 

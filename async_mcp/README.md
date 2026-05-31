@@ -109,7 +109,7 @@ Durable Temporal-based client that manages the full MCP task lifecycle. Runs on 
 - **`workflows.py`** — `TaskTrackerWorkflow`: one instance per MCP task. Polls status, triggers elicitation activity, retrieves result. Signals: `elicitation_received`, `user_decision`. Queries: `get_elicitation_details`, `get_pending_decision`.
 - **`activities.py`** — `MCPActivities`: holds the shared `fastmcp.Client`. Four activities: `start_task`, `poll_task_status`, `handle_elicitation`, `get_task_result`.
 - **`worker.py`** — Worker startup. Wires the elicitation handler and starts the Temporal worker.
-- **`ui.py`** — Interactive CLI. Connects to Temporal only (no MCP). Polls for pending elicitations and handles them one at a time.
+- **`ui.py`** — Interactive CLI. Connects to Temporal only (no MCP). Type `list` to see running tasks and handle any pending approvals one at a time.
 
 ### Legacy CLI Client (`mcp_client/`)
 
