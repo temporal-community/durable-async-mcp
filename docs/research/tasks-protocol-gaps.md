@@ -71,6 +71,10 @@ SEP-2322 ("Multi Round-Trip Requests") proposes a stateless `IncompleteResult` r
 
 The MCP *specification* is silent on how the receive loop is implemented — it defines protocol messages, not runtime behavior. This is therefore not a spec gap but an **implementation gap in the MCP Python SDK** (`git@github.com:modelcontextprotocol/python-sdk.git`). A spec-compliant implementation could handle this correctly; the current Python SDK implementation happens not to.
 
+### Precise framing
+
+The issue is within a single client session: the receive loop processes incoming server→client *requests* (like `elicitation/create`) sequentially. It is not about multiple sessions being queued — our architecture uses one shared session (one stdio subprocess). Within that session, each `elicitation/create` blocks the loop until its handler returns, preventing any other buffered messages from being processed.
+
 ### The Implementation Issue
 
 The MCP Python SDK's `_receive_loop` in `mcp/shared/session.py` dispatches incoming server→client requests (like `elicitation/create`) inline with `await`:
@@ -120,13 +124,33 @@ raise RuntimeError("No decision yet; handle_elicitation will retry")
 
 ### Proposed SDK Fix
 
-**PR in progress**: [modelcontextprotocol/python-sdk#2490](https://github.com/modelcontextprotocol/python-sdk/pull/2490) — open as of 2026-05-31.
+**Issue**: [modelcontextprotocol/python-sdk#2489](https://github.com/modelcontextprotocol/python-sdk/issues/2489) — describes the sequential inline dispatch limitation ("Peak in-flight handlers = 1 regardless of fan-out").
+
+**PR in progress**: [modelcontextprotocol/python-sdk#2490](https://github.com/modelcontextprotocol/python-sdk/pull/2490) ("fix: dispatch client request handlers concurrently", Closes #2489) — open as of 2026-05-31.
 
 The PR introduces an opt-in `_dispatch_requests_concurrently` flag on `BaseSession`. When set, request handlers are spawned with `task_group.start_soon()` instead of being awaited inline. `ClientSession` enables this flag (parallel execution), while `ServerSession` keeps it off to preserve its initialization state machine ordering.
 
 The change is more involved than a one-line swap: concurrent dispatch exposed two race conditions in `RequestResponder` that the PR also fixes — a cancel-before-enter race and an idempotent cancellation issue. Handler exceptions are also now caught and translated to JSON-RPC error responses rather than terminating the session.
 
 The net effect for our use case: `ClientSession` (which is what `fastmcp.Client` uses) gets non-blocking dispatch of incoming server→client requests. `_elicitation_handler` can poll for minutes without blocking other in-flight requests.
+
+### Transport Dependency: Does This Apply to Streamable HTTP?
+
+This bottleneck is **confirmed for stdio transport** (our current setup) where there is one subprocess, one pipe, and one shared `_read_stream` feeding the receive loop.
+
+For **streamable HTTP** the answer depends on how the transport is wired:
+
+- **Shared SSE channel**: if the client maintains one persistent GET connection for all server-initiated messages, all `elicitation/create` requests arrive on that single stream — same sequential bottleneck applies.
+
+- **Per-request response streams**: if each client HTTP POST (`tasks/result`) gets its own independent response stream and the server sends `elicitation/create` back on that specific stream, the streams are isolated. Handler A blocking on its stream would not affect handler B's stream. The sequential receive loop problem would not apply and the 20ms workaround would be unnecessary overhead.
+
+The MCP streamable HTTP spec permits either model. The Python SDK's HTTP transport implementation would need to be checked to determine which applies. If it uses isolated per-request streams, concurrent tasks over HTTP would not hit this problem.
+
+### Our Workaround (stdio) and What It Actually Does
+
+The 20ms check-once-and-raise pattern achieves concurrency-like behavior by rotating through pending elicitations: each handler takes a brief turn on the receive loop (~20ms), yields if the human hasn't responded yet, and Temporal retries after a short backoff. When a retry fires and the answer is ready, the handler completes immediately. The receive loop is free between retries to process other buffered messages (responses to `start_task`, `poll_task_status`, etc.).
+
+Temporal workflow state (`_pending_decision`, `_active_elicitations`, `x-task-id` routing) preserves enough context across retries that each resumption is seamless — the server re-elicits idempotently and the handler either finds the answer or yields again.
 
 ### Impact on Our Design If the SDK Is Fixed
 

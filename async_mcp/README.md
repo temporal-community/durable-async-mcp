@@ -74,7 +74,7 @@ Approval needed for task task-tracker-<uuid>:
 
 ### Legacy LLM-driven client
 
-The original client uses an LLM (OpenAI Responses API) to drive the MCP tool calls. It requires `OPENAI_API_KEY` and does not use the client worker:
+The original client uses an LLM (OpenAI Responses API) to drive the MCP tool calls. It is the non-durable predecessor to the client worker, kept for comparison; it requires `OPENAI_API_KEY` and does not use the client worker:
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -113,7 +113,7 @@ Durable Temporal-based client that manages the full MCP task lifecycle. Runs on 
 
 ### Legacy CLI Client (`mcp_client/`)
 
-Interactive terminal client that uses an LLM (OpenAI Responses API) to drive MCP tool calls directly.
+Interactive terminal client that uses an LLM (OpenAI Responses API) to drive MCP tool calls directly. Superseded by `client_worker/` and kept only as a comparison point — it demonstrates the hand-rolled, non-durable polling/elicitation loop that the durable client replaces. Self-contained, with its own inline chat-loop UI (distinct from `client_worker/ui.py`).
 
 - **`mcp_client/main.py`** — Entry point: config loading, MCP connection, chat loop, elicitation handler
 - **`mcp_client/llm.py`** — OpenAI integration: schema conversion, conversation state, LLM calls
