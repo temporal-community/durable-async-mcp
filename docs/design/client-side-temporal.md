@@ -1,5 +1,12 @@
 # Client-Side Temporal: Design, Debate, and Decision
 
+> **⚠️ Partially superseded.** The *core thesis* — Temporal on the client for durability, crash
+> recovery, and poll-loop management — still holds and is realized by
+> [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md)
+> ([ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md)). The *implementation details here are
+> obsolete*: server-initiated elicitation, `_elicitation_handler`, `x-task-id`, and blocking
+> `tasks/result` are gone in v2 (HITL is pull-based via `tasks/get` `inputRequests` + `tasks/update`).
+
 ## Overview
 
 This document captures the architecture, the options considered, and the reasons for using Temporal on the **client side** of the MCP Tasks protocol. The core conclusion: Temporal on the client side is not a convenience or a pattern preference — it eliminates an entire category of hand-rolled distributed systems infrastructure that a stateless client would need, while simultaneously making the client more correct, more durable, and more extensible to multiple UI types.

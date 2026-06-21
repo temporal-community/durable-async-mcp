@@ -1,5 +1,13 @@
 # Plan: Replace Docket/Redis Task Layer with Temporal-Backed MCP Task Handlers
 
+> **⚠️ Historical / superseded.** This planned overwriting FastMCP's handlers with
+> `temporal_task_handlers.py` for the 2025-11-25 Tasks feature. In v2, Tasks is an *extension*: we
+> register handlers on the lowlevel `Server` via `register_tasks_extension` — see
+> [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md),
+> [`temporal-tasks-extension.md`](temporal-tasks-extension.md), and
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md). Kept for history; the v2 approach is the
+> *current experiment*, not a permanent move off FastMCP.
+
 ## Context
 
 The MCP server uses FastMCP's `task=True` decorator, which routes task execution through Docket/Redis for background job management. This is redundant because Temporal already provides durable execution, status queries, signals, and cancellation. The Docket layer also can't represent the `input_required` MCP task state, making the approval elicitation flow broken at the protocol level. We're removing this middleman so MCP tasks map directly to Temporal workflows.

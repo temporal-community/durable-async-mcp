@@ -1,5 +1,10 @@
 # Plan: Build a Simple MCP CLI Client
 
+> **⚠️ Historical / superseded.** Planned the OpenAI-driven `mcp_client/` CLI, which has since been
+> **deleted**. The durable client is now [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md)
+> (Temporal Plugin) — see [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md). Kept for
+> history; the v2 approach is the *current experiment*, not a permanent move off FastMCP.
+
 ## Context
 
 No existing MCP GUI/IDE client supports the Tasks protocol (SEP-1686). We need a client that can demo the full invoice processing flow: start a task-enabled tool, poll for status, handle elicitation (approval), and get the final result. The client uses an LLM (OpenAI Responses API) to drive tool selection and a FastMCP `Client` for MCP communication.

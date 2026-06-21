@@ -1,5 +1,10 @@
 # Local Invocation Approaches for MCP Servers
 
+> **Note (predates v2).** Transport analysis from before the 2026-07-28 redesign, which removes
+> unsolicited server→client requests (eliminating the "funnel"/sequential-reader problem at the
+> protocol level). Still a valid analysis of the transport trade-offs — see
+> [`mcp-2026-07-28-spec-impact.md`](mcp-2026-07-28-spec-impact.md).
+
 Learning notes (2026-06-03) exploring why MCP servers run locally over stdio, and
 what other local transports could be considered. Grew out of the discussion in
 [`tasks-protocol-gaps.md`](tasks-protocol-gaps.md) about the single-reader "funnel"

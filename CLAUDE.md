@@ -4,32 +4,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an invoice processing demo that integrates Temporal workflows with the Model Context Protocol (MCP). It uses MCP Tasks (SEP-1686) for async long-running operations and MCP Elicitation for human-in-the-loop approval flows.
+This is an invoice processing demo that integrates Temporal workflows with the Model Context Protocol (MCP). It implements the **MCP Tasks extension** (`io.modelcontextprotocol/tasks`, the 2026-07-28 draft) — Temporal-backed — for async long-running operations with human-in-the-loop approval.
 
-The repo contains a shared business service (`bizservice/`) and multiple MCP server implementations:
-- `async_mcp/` — Uses MCP Tasks + Elicitation with custom Temporal-backed task handlers
-- `durable_sync_mcp/` — Synchronous tools (no MCP Tasks), designed for Claude Desktop over stdio
+The Tasks extension is implemented generically and reusably in **`mcp_tasks_temporal/`** and distributed as a Temporal Plugin; the invoice app is its first consumer. The `mcp==2.0.0a2` SDK deliberately omits the extension, so the wire types and handlers are hand-written — see `docs/research/v2-alpha-spike-findings.md` and `docs/plans/temporal-tasks-extension.md`.
 
-The client side of the async MCP integration is in `async_mcp/client_worker/` — a durable Temporal-based client that replaces hand-rolled polling loops. A separate `async_mcp/mcp_client/` is the older LLM-driven client (OpenAI Responses API).
+The repo contains a shared business service (`bizservice/`) and MCP server implementations:
+- `invoice_processing_mcp/` — the invoice server + durable client, built on the Temporal tasks extension (`mcp` v2)
+- `durable_sync_mcp/` — synchronous tools (no Tasks) for Claude Desktop; uses the SDK-vendored `mcp.server.fastmcp` (removed in v2), **not migrated** — fails to import under the v2 cutover (see note below)
+
+The client side is `invoice_processing_mcp/client/` — a durable Temporal-based client that adopts `mcp_tasks_temporal`'s plugin. (An older LLM-driven CLI client was removed in the v2 migration.)
 
 ## Repository Structure
 
 ```
-bizservice/              Temporal workflows, activities, worker, CLI
-async_mcp/               MCP server using Tasks + Elicitation
-  server.py              FastMCP server with task-enabled process_invoice tool
-  temporal_task_handlers.py  Custom task handlers replacing Docket/Redis
-  client_worker/         Durable Temporal-based client (worker + UI)
-    workflows.py         TaskTrackerWorkflow — one per in-flight MCP task
-    activities.py        MCPActivities — drives MCP task protocol
-    worker.py            Worker startup (runs TaskTrackerWorkflow + MCPActivities)
-    ui.py                Interactive CLI UI (connects to Temporal only, no MCP)
-    models.py            Shared dataclasses (ElicitationDetails, TaskTrackerInput)
-  mcp_client/            Legacy LLM-driven CLI client (OpenAI Responses API)
+bizservice/              Temporal workflows, activities, worker, CLI (pure Temporal; unchanged)
+mcp_tasks_temporal/      Reusable Temporal-backed MCP Tasks extension (io.modelcontextprotocol/tasks)
+  wire.py                Pydantic wire types for the extension
+  _sdk_compat.py         Alpha shim: lets a bare CreateTaskResult pass tools/call validation
+  server.py              register_tasks_extension(server, backend) — wires tasks/* onto a lowlevel Server
+  backend.py             TaskBackend protocol + TaskState (MCP task state you map workflow state onto)
+  client/                Durable client: workflows.py, activities.py, session.py, models.py
+  plugin.py              MCPTasksClientPlugin — the Temporal Plugin packaging the client
+  tests/                 Unit + in-memory-transport + time-skipping tests
+invoice_processing_mcp/  Invoice app (consumer of mcp_tasks_temporal) — two components:
+  server/                The MCP server
+    server.py            Lowlevel MCP server; process_invoice via the tasks extension
+    invoice_backend.py   InvoiceTaskBackend — TaskBackend backed by InvoiceWorkflow (task ID = workflow ID)
+    __main__.py          `python -m invoice_processing_mcp.server`
+  client/                The client application
+    worker.py            Durable MCP client = Temporal worker adopting MCPTasksClientPlugin (one plugins=[...] entry)
+    ui.py                Interactive CLI (Temporal only); renders inputRequests
+    __main__.py          `python -m invoice_processing_mcp.client` (defaults to UI)
   client_config.json     MCP client config (Claude Desktop format)
   boot-demo.sh           tmux helper to start server + worker
-  tests/                 Tests for task handlers, activities, and workflows
-durable_sync_mcp/        MCP server using synchronous tools (no Tasks)
+  tests/                 test_invoice_backend.py (backend mapping + server wiring)
+durable_sync_mcp/        Synchronous-tools server using SDK-vendored mcp.server.fastmcp (removed in v2; NOT migrated — see note)
   server.py              FastMCP server with individual tools for Claude Desktop
   claude_desktop_config.json  Sample Claude Desktop config
   README.md              Setup and usage instructions
@@ -37,12 +46,18 @@ samples/                 Sample invoice JSON files
 docs/                    Design docs, research, and plans
 ```
 
+> **durable_sync_mcp note:** it imports `mcp.server.fastmcp.FastMCP` — the FastMCP that was vendored
+> into the SDK in v1 and **removed in `mcp 2.0.0a2`** — so it fails to import under the v2 cutover. It
+> is left unmigrated; to revive it, port it to `mcp.server.mcpserver.MCPServer` (or the lowlevel
+> `Server`), or run it in a separate venv pinned to `mcp 1.x`. (Distinct from the *standalone*
+> `fastmcp` package, which the now-removed legacy CLI client used and which is also uninstalled.)
+
 ## Commands
 
 ### Setup
 ```bash
 uv venv && source .venv/bin/activate
-uv pip install -e .
+uv pip install -e ".[dev]"   # installs mcp==2.0.0a2 (pinned), temporalio, dev tools
 ```
 
 ### Running the Demo
@@ -53,27 +68,26 @@ temporal server start-dev
 # Terminal 2: Start the bizservice worker (processes invoices)
 python -m bizservice.worker [--fail-validate] [--fail-payment]
 
-# Terminal 3: Start the async MCP server
-python -m async_mcp.server
+# Terminal 3: MCP server (also launched over stdio by the client per client_config.json;
+#             running it standalone is optional)
+python -m invoice_processing_mcp.server
 
-# Terminal 4: Start the client-side Temporal worker (manages MCP task lifecycle)
-python -m async_mcp.client_worker.worker [--config async_mcp/client_config.json]
+# Terminal 4: client-side Temporal worker (durable MCP tasks client)
+python -m invoice_processing_mcp.client.worker [--config invoice_processing_mcp/client_config.json]
 
-# Terminal 5: Start the UI (connects to Temporal only, no MCP)
-python -m async_mcp.client_worker.ui
-# or: python -m async_mcp.client_worker  (defaults to UI)
-
-# Legacy LLM-driven client (requires OPENAI_API_KEY)
-python -m async_mcp.mcp_client [--config async_mcp/client_config.json] [--model gpt-4o]
+# Terminal 5: UI (connects to Temporal only)
+python -m invoice_processing_mcp.client.ui
+# or: python -m invoice_processing_mcp.client  (defaults to UI)
 
 # Or use the helper script (requires tmux)
-./async_mcp/boot-demo.sh
+./invoice_processing_mcp/boot-demo.sh
 ```
 
 ### Running Tests
 ```bash
-uv run pytest async_mcp/tests/
-uv run pytest async_mcp/tests/test_task_handlers.py::TestClassName::test_name  # single test
+uv run pytest                                            # all (testpaths: mcp_tasks_temporal/tests, invoice_processing_mcp/tests)
+uv run pytest mcp_tasks_temporal/tests/test_server.py -q # one file
+uv run pytest path/to/test.py::test_name                 # single test
 ```
 
 ### Linting/Formatting
@@ -97,34 +111,32 @@ mypy .
 ### Worker (`bizservice/worker.py`)
 Connects to Temporal and polls `invoice-task-queue` for both workflows and activities. Supports `--fail-validate` and `--fail-payment` flags to force failures for testing.
 
-### Async MCP Server (`async_mcp/server.py`)
+### MCP Server (`invoice_processing_mcp/server/`)
 
-**Tools:**
-- `process_invoice` (task-enabled) — Starts a Temporal workflow and returns immediately with a task ID. The client polls `tasks/get` for status; calls `tasks/result` when `input_required` (to trigger elicitation) or `completed`/`failed`.
+`server.py` builds a lowlevel `mcp.server.lowlevel.Server`, exposes `process_invoice` via
+`on_list_tools`, and calls `register_tasks_extension(server, InvoiceTaskBackend(client), task_tools={"process_invoice"})`, then serves over stdio.
 
-**Task Lifecycle:**
+`InvoiceTaskBackend` (`invoice_backend.py`) implements `TaskBackend` against Temporal — **the workflow ID is the MCP task ID** (1:1, no lookup table):
+- `start` → starts `InvoiceWorkflow` on `invoice-task-queue`, returns the initial (`working`) `TaskState`
+- `get_state` → **maps workflow state → task state**: queries `GetInvoiceStatus` and maps it via `TEMPORAL_TO_MCP_STATE`; on `PENDING-APPROVAL` builds the approval `inputRequests` (an `elicitation/create` with an approve/reject schema); on `PAID`/`REJECTED` the terminal `result`; on `FAILED` an `error`
+- `submit_input` → reads the `"approval"` response, signals `ApproveInvoice` / `RejectInvoice`
+- `cancel` → cancels the workflow
+
+**Task Lifecycle (v2 extension — pure polling; elicitation is data, not a server push):**
 ```
-Client                          MCP Server                    Temporal
-  |                               |                            |
-  |-- tools/call (task meta) ---->|                            |
-  |  (process_invoice)            |-- start_workflow --------->|
-  |<-- CallToolResult ------------|  (taskId = workflow_id)    |
-  |   (taskId, status:working)    |                            |
-  |                               |                            |
-  |-- tasks/get(taskId) --------->|-- query GetInvoiceStatus ->|
-  |<-- status:working ------------|<-- PENDING-VALIDATION -----|
-  |                               |                            |
-  |-- tasks/get(taskId) --------->|-- query GetInvoiceStatus ->|
-  |<-- status:input_required -----|<-- PENDING-APPROVAL -------|
-  |                               |                            |
-  |-- tasks/result(taskId) ------>|                            |
-  |<-- elicitation: approve? -----|  (ctx.elicit within        |
-  |-- user responds: approve ---->|   tasks/result handler)    |
-  |                               |-- signal ApproveInvoice -->|
-  |                               |-- handle.result() -------->|
-  |                               |<-- "PAID" -----------------|
-  |<-- CallToolResult ------------|                            |
-  |   (status: PAID)              |                            |
+Client                          MCP Server                      Temporal
+  |-- tools/call (ext _meta) --->|                               |
+  |   process_invoice            |-- start_workflow ------------>|  (taskId = workflow_id)
+  |<-- CreateTaskResult ---------|  (status: working)            |
+  |-- tasks/get(taskId) -------->|-- query GetInvoiceStatus ---->|
+  |<-- status: working ----------|<-- PENDING-VALIDATION --------|
+  |-- tasks/get(taskId) -------->|-- query GetInvoiceStatus ---->|
+  |<-- input_required + ---------|<-- PENDING-APPROVAL ----------|
+  |    inputRequests{approval}   |                               |
+  |-- tasks/update ------------->|-- signal ApproveInvoice ----->|
+  |    inputResponses{approval}  |<-- (empty ack) ---------------|
+  |-- tasks/get(taskId) -------->|-- query GetInvoiceStatus ---->|
+  |<-- completed + result -------|<-- PAID ----------------------|
 ```
 
 ### Sync MCP Server (`durable_sync_mcp/server.py`)
@@ -155,68 +167,40 @@ Claude Desktop                  MCP Server                    Temporal
   |<-- "APPROVED" ---------------|                            |
 ```
 
-### Task Handlers (`async_mcp/temporal_task_handlers.py`)
+### Tasks Extension (`mcp_tasks_temporal/`)
 
-Custom MCP task protocol handlers that replace FastMCP's Docket/Redis layer. The Temporal workflow ID *is* the MCP task ID (1:1 mapping, no lookup table).
+A reusable, Temporal-backed implementation of the MCP **Tasks extension** (`io.modelcontextprotocol/tasks`), hand-written because `mcp==2.0.0a2` deliberately omits it (`mcp.types.methods` comments `tasks/* deliberately absent`). The invoice app is its first consumer.
 
-- **`register_temporal_task_handlers(mcp)`** — Entry point, overwrites 5 request handlers on FastMCP's low-level server
-- **`handle_tasks_get`** — Queries `GetInvoiceStatus` on the Temporal workflow, maps to MCP task state
-- **`handle_tasks_result`** — For terminal states: returns `CallToolResult`. For `PENDING-APPROVAL`: triggers elicitation, signals workflow, blocks on `handle.result()` until terminal (per MCP spec Result Retrieval #3). The client cancels this request after elicitation and resumes polling; the server coroutine runs to completion with its response discarded.
-- **`handle_tasks_list`** — Lists active invoice workflows via Temporal's `list_workflows`
-- **`handle_tasks_cancel`** — Cancels a running workflow via Temporal's cancel API
-- **`_make_wrapped_call_tool`** — Wraps FastMCP's `CallToolRequest` handler to intercept task-augmented `process_invoice` calls
+**Usage guide for building your own tasks server/client with this package:** [`mcp_tasks_temporal/README.md`](mcp_tasks_temporal/README.md).
 
-### Client-Side Temporal Worker (`async_mcp/client_worker/`)
+- **`wire.py`** — Pydantic types: `CreateTaskResult`, `GetTaskResult` (DetailedTask variants), `InputRequest`/`InputResponse`, the `tasks/*` request-param models, and capability helpers (`client_capability_meta`, `declares_tasks_extension`). camelCase on the wire.
+- **`_sdk_compat.py`** — `install_tasks_result_passthrough()`: a narrow, guard-tested seam over the SDK's `serialize_server_result` (server) / `validate_server_result` (client) so a bare `CreateTaskResult` (`resultType:"task"`) passes `tools/call` validation. `tasks/*` are unknown to the SDK and pass through untouched. **This is the one core gap to upstream** (widen the tools/call result surface, or add a result-type registration hook) — see `mcp_tasks_temporal/README.md` → "Path to native"; not throwaway.
+- **`server.py`** — `register_tasks_extension(server, backend, *, task_tools=None, fallback_call_tool=None)`: installs the shim, advertises the capability, wraps `tools/call` (capability-gated → `CreateTaskResult`), and registers `tasks/get`/`tasks/update`/`tasks/cancel` via `server.add_request_handler(method, ParamsModel, handler)` on a `mcp.server.lowlevel.Server`. Delegates app behavior to a `TaskBackend`.
+- **`backend.py`** — `TaskBackend` protocol (`start`/`get_state`/`submit_input`/`cancel`) + `TaskState` (the MCP-facing task state a backend maps its workflow state onto).
+- **`client/`** — the durable client: `workflows.TaskTrackerWorkflow` (poll → surface `inputRequests` → await `user_decision` → `tasks/update` → terminal), `activities.MCPActivities` (`start_task`/`poll_task`/`submit_task_input`/`cancel_task` over a shared session), `session.py` (stdio session + per-request capability `_meta`; result retrieval folded into `poll_task`), `models.py` (sandbox-safe dataclasses + activity-name string constants).
+- **`plugin.py`** — `MCPTasksClientPlugin(server_params)`: a Temporal `SimplePlugin` bundling the workflow + activities + the MCP session lifecycle (via `run_context`). One `plugins=[...]` entry adopts the whole durable client.
 
-Durable Temporal-based client that manages the full MCP task lifecycle. Replaces hand-rolled polling loops with a `TaskTrackerWorkflow` per in-flight task. The UI is a separate process — it connects to Temporal only (no MCP).
+### Client Application (`invoice_processing_mcp/client/`)
 
-**`TaskTrackerWorkflow` (`workflows.py`)**
-- One instance per MCP task. Polls task status, handles elicitation, retrieves final result.
-- Signals: `elicitation_received(details)` (from activity), `user_decision(decision)` (from UI)
-- Queries: `get_elicitation_details()` (for UI), `get_pending_decision()` (for activity)
-- Workflow ID format: `task-tracker-{uuid}`. Task queue: `client-task-queue`.
+The invoice consumer of the durable client; the reusable parts live in `mcp_tasks_temporal`.
 
-**`MCPActivities` (`activities.py`)**
-- Shares one `fastmcp.Client` connection for the lifetime of the worker.
-- `start_task(invoice_json)` — calls `process_invoice` tool with `task=True`, returns task ID (`task.task_id`)
-- `poll_task_status(task_id)` — calls `client.get_task_status(task_id)`, returns `status.status` string
-- `handle_elicitation(task_id)` — registers `task_id → workflow_id` in `_active_elicitations`, runs `get_task_result` in a background `asyncio.create_task`, and cancels it per MCP spec once the elicitation event fires. Returns `"elicitation_handled"` or `"completed"`.
-- `get_task_result(task_id)` — fetches and returns the final `CallToolResult` text
-- `_elicitation_handler(message, response_type, params, context)` — registered with `fastmcp.Client` at construction. Reads `x-task-id` from `params.requestedSchema` to look up the target `TaskTrackerWorkflow` in `_active_elicitations`. Signals the workflow with elicitation details, then checks `get_pending_decision` **once** and either returns `ElicitResult` or raises. Does NOT poll — see below.
+- **`worker.py`** — reads the Claude Desktop-format config, builds `StdioServerParameters`, and runs `Worker(client, task_queue=models.TASK_QUEUE, plugins=[MCPTasksClientPlugin(server_params)])`. The plugin registers `TaskTrackerWorkflow` + the wire activities and owns the MCP session — no explicit workflow/activity lists.
+- **`ui.py`** — Temporal-only CLI. `submit <file>` starts a `TaskTrackerWorkflow` for `process_invoice`; `list` shows running tasks and renders any pending `inputRequests` (querying `get_pending_input`), then signals `user_decision` with the `inputResponses`.
 
-**Elicitation routing**: `_active_elicitations: dict[str, str]` maps `mcp_task_id → TaskTrackerWorkflow_id`. The server embeds `x-task-id` in the `requestedSchema` (set in `handle_tasks_result` via `ctx.session.elicit_form()`). `_elicitation_handler` reads it back to route without needing `activity.info()` (which is unavailable in FastMCP's dispatch task).
+**No elicitation callback, no concurrency hack.** Because v2 surfaces input as data in `tasks/get` and answers it via `tasks/update`, the old `_elicitation_handler`, `_active_elicitations`, `x-task-id` smuggling, and 20ms-raise workaround are all gone. HITL is just "store `inputRequests` → await a signal → `tasks/update`" inside the workflow.
 
-**Elicitation + sequential reader**: The MCP Python SDK (`modelcontextprotocol/python-sdk`, `mcp/shared/session.py`) dispatches `elicitation/create` inline with `await _received_request(responder)` — the reader cannot process other messages while the handler runs. This is an SDK implementation choice, not a spec requirement. With N concurrent tasks all calling `tasks/result`, a handler that polls for minutes would starve `start_task` and other activities. Fix: the handler checks once (~20ms) and raises if no decision, releasing the reader. Temporal retries `handle_elicitation` (capped at 10s backoff) — brief turns on the reader rather than holding it. Elicitation predates Tasks and the SDK was never updated for concurrent use.
-
-**`ui.py`** — Interactive CLI. Connects to Temporal only; no `fastmcp.Client`. Commands: `submit <file>` starts a new task, `list` shows running tasks and surfaces any pending elicitations one at a time, `quit` exits. Elicitation check runs only on `list` — not automatically — so the user can submit new invoices freely. Key operations: `start_workflow(TaskTrackerWorkflow.run, ...)`, `handle.query(get_elicitation_details)`, `handle.signal(user_decision, decision)`.
-
-### Legacy MCP CLI Client (`async_mcp/mcp_client/`)
-Older interactive CLI client that uses an LLM (OpenAI Responses API) to drive MCP tool calls. Requires `OPENAI_API_KEY`. Superseded by `client_worker/` (which adds durability) but kept as a working comparison point — it shows the hand-rolled, non-durable approach the client worker replaces. It is fully self-contained: it has its *own* inline chat-loop UI and elicitation prompts in `main.py` (unrelated to `client_worker/ui.py`, which belongs to the durable client). Nothing in the runtime path imports it.
-
-- **`mcp_client/main.py`** — Entry point: config loading, MCP connection via `fastmcp.Client`, chat loop, elicitation handler, client-side tools. Run with `python -m async_mcp.mcp_client`.
-- **`mcp_client/llm.py`** — OpenAI integration: MCP->OpenAI tool schema conversion, conversation state management, LLM API calls, response parsing.
-- **`async_mcp/client_config.json`** — Sample config (Claude Desktop format) pointing to `async_mcp/server.py` via stdio.
-
-**Key workarounds for FastMCP Client**:
-- `ToolTask.status()` caches the first result and never refreshes — use `client.get_task_status()` directly for polling
-- `ToolTask.result()` internally calls `wait()` which only watches for terminal states, skipping `input_required` — use `_poll_and_resolve_task()` which polls with `get_task_status()` and then calls `get_task_result()` directly
+### Legacy MCP CLI Client — REMOVED
+The old LLM-driven CLI (formerly `async_mcp/mcp_client/`, OpenAI Responses API + standalone `fastmcp`) was **deleted** in the v2 migration. Some historical design/plan docs under `docs/` still reference it for context.
 
 ## Key Patterns
 
-- The `process_invoice` tool uses `task=TaskConfig(mode="required")` — clients must use the task protocol. The actual task execution is handled by custom Temporal-backed handlers (not Docket).
-- Server-side: workflow ID = MCP task ID — no lookup table needed
-- Client-side: `TaskTrackerWorkflow` ID is `task-tracker-{uuid}` (distinct from the server-side MCP task ID)
-- Approval is handled via MCP Elicitation inside the `tasks/result` handler when the workflow is in `PENDING-APPROVAL` state
-- FastMCP Client task API: `call_tool(name, args, task=True)` returns `ToolTask` with `.task_id`; `get_task_status(id).status` returns state string; `get_task_result(id)` returns dict validatable as `CallToolResult`
-- Elicitation handler signature: `async def handler(message, response_type, params, context)` — pass to `Client(config, elicitation_handler=handler)` or set via `client.set_elicitation_callback(handler)`
-- `activity.info().workflow_id` is NOT accessible inside the elicitation callback — FastMCP dispatches it in a new asyncio task that doesn't inherit Temporal's context variables. Use `_active_elicitations` dict lookup instead.
-- `_active_elicitations: dict[mcp_task_id, tracker_wf_id]` — set in `handle_elicitation` before calling `get_task_result`; read in `_elicitation_handler` via `x-task-id` from `params.requestedSchema`
-- Server embeds routing info in elicitation via `ctx.session.elicit_form(requestedSchema={..., "x-task-id": task_id})` — do NOT use `ctx.elicit()` (it auto-generates schema with no room for custom fields)
-- `_make_wrapped_call_tool` always intercepts `process_invoice` — the original `is_task` check via `ctx.experimental.is_task` was broken and has been removed
-- Invoice JSON structure: `{"invoice_id": str, "customer": str, "lines": [{"description": str, "amount": number, "due_date": ISO8601}]}`
-- Temporal address configurable via `TEMPORAL_ADDRESS` env var (default: `localhost:7233`)
-- Tests use `temporalio.testing.WorkflowEnvironment.start_time_skipping()` (embedded in-process Temporal test server)
-- Test workers use `SandboxedWorkflowRunner(restrictions=SandboxRestrictions.default.with_passthrough_modules("beartype", "fastmcp", "mcp"))` to avoid import issues in the sandbox
-- `workflow.unsafe.imports_passed_through()` is used in `TaskTrackerWorkflow` to import `MCPActivities` (fastmcp import chain must not be determinism-checked)
-- The legacy MCP CLI client requires `OPENAI_API_KEY` env var to be set
-- Client config uses Claude Desktop format: `{"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}`
+- **Tasks is an extension we implement, not an SDK feature.** `mcp==2.0.0a2` ships the `extensions` capability container but no tasks code; we hand-define the wire types and register `tasks/*` on the lowlevel server (this package is intended to *be* the canonical tasks implementation). New methods pass through unvalidated; `tools/call` needs the `_sdk_compat` seam to return a bare `CreateTaskResult`. That seam is the one core gap "native tasks" must close upstream (widen the tools/call result surface, or add a result-type registration hook) — not throwaway, but the thing to upstream; the handlers/client are already final. See `mcp_tasks_temporal/README.md` → "Path to native".
+- **Server-side: workflow ID = MCP task ID** (no lookup table). **Client-side:** `TaskTrackerWorkflow` ID is `task-tracker-{uuid}`, distinct; the MCP task ID lives in workflow state. There is no `tasks/list` in v2 — Temporal `list_workflows` is the durable task registry.
+- **Capability negotiation is per-request `_meta`**: the client adds `_meta.io.modelcontextprotocol/clientCapabilities.extensions["io.modelcontextprotocol/tasks"]`; the server gates task creation on it (`declares_tasks_extension`) and MUST NOT create a task otherwise.
+- **HITL via Tasks (no server push)**: `PENDING-APPROVAL` → `tasks/get` carries `inputRequests`; the client answers via `tasks/update` (`inputResponses`), which signals `ApproveInvoice`/`RejectInvoice`.
+- **Client adoption is one line**: `Worker(..., plugins=[MCPTasksClientPlugin(server_params)])` — no explicit workflows/activities (the plugin injects them; verified on `temporalio` 1.29).
+- **Sandbox cleanliness**: `TaskTrackerWorkflow` imports only `mcp_tasks_temporal.client.models` (pure dataclasses) and references activities by string name, so `mcp` never loads in the workflow sandbox. Package `__init__` files are kept import-light for the same reason. Worker passes `SandboxedWorkflowRunner(restrictions=...with_passthrough_modules("beartype"))`.
+- Invoice JSON: `{"invoice_id": str, "customer": str, "lines": [{"description": str, "amount": number, "due_date": ISO8601}]}`
+- Temporal address via `TEMPORAL_ADDRESS` (default `localhost:7233`); client config uses Claude Desktop format `{"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}`.
+- **Testing**: extension + server tested end-to-end over the in-memory MCP transport (`mcp.shared.memory.create_client_server_memory_streams`); the client workflow under `WorkflowEnvironment.start_time_skipping()`. The real-workflow E2E is the manual demo — `InvoiceWorkflow`'s 5-day approval timer makes the time-skipping env auto-approve, so it isn't in the suite.
+- `mcp==2.0.0a2` is pinned (unpinned resolves to v1); `temporalio>=1.19` for the Plugins API.

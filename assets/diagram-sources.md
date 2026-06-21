@@ -1,3 +1,11 @@
+<!--
+  ⚠️ Historical / superseded. These diagrams show the 2025-11-25 Tasks protocol: blocking
+  tasks/result, server-initiated elicitation/create, tasks/list. The v2 (2026-07-28) extension is
+  pure polling — tasks/get returns inputRequests when input_required, answered via tasks/update; no
+  tasks/result, no server-initiated requests. See ../docs/decisions/002-migrate-to-tasks-extension-v2.md
+  and ../mcp_tasks_temporal/README.md. The v2 approach is the current experiment, not a permanent move off FastMCP.
+-->
+
 ```mermaid
 sequenceDiagram
     participant C as Client (Requestor)

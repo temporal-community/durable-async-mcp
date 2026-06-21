@@ -1,5 +1,9 @@
 # The Durable-Client Thesis After MCP's Stateless Redesign
 
+> **Status: current.** Written for the 2026-07-28 redesign; this thesis is realized by the
+> Temporal-backed Tasks extension in [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md) — see
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md).
+
 A positioning note written 2026-05-31, after reviewing the MCP 2026-07-28 release
 candidate. Companion to [`../research/mcp-2026-07-28-spec-impact.md`](../research/mcp-2026-07-28-spec-impact.md),
 which catalogs the spec changes; this note argues what they mean for the project's

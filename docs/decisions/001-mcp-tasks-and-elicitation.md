@@ -2,7 +2,11 @@
 
 ## Status
 
-In progress (branch: `mcp-tasks`, uncommitted)
+**Superseded by [ADR-002](002-migrate-to-tasks-extension-v2.md)** (2026-06-20). The approach here —
+MCP Tasks as a *core* feature (SEP-1686, 2025-11-25) with FastMCP + server-initiated elicitation via
+`ctx.elicit()` inside a blocking `tasks/result` — was migrated to the 2026-07-28 **Tasks extension**.
+Kept as the historical record of the first design. (Note: this does not abandon FastMCP forever — see
+ADR-002; the Temporal-backed extension is the current direction.)
 
 ## Date
 

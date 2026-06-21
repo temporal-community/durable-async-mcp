@@ -1,5 +1,12 @@
 # Activity Signaling Its Own Workflow: Pattern and Rationale
 
+> **⚠️ Historical / superseded.** Documents the `_elicitation_handler` workaround (an activity signaling
+> its own workflow) needed for server-initiated elicitation under the 2025-11-25 spec. That whole
+> mechanism is gone in v2 — HITL is pull-based (`tasks/get` `inputRequests` → `tasks/update`). See
+> [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md) and
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md). Kept for history; the v2 approach is the
+> *current experiment*, not a permanent move off FastMCP.
+
 ## The Pattern
 
 In `async_mcp/client_worker/activities.py`, the `_elicitation_handler` callback (called from within the `handle_elicitation` activity) reaches *up* into its own parent workflow:

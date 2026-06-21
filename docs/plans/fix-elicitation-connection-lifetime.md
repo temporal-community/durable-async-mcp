@@ -1,5 +1,11 @@
 # Plan: Fix handle_elicitation Connection Lifetime
 
+> **⚠️ Historical / superseded.** Fixes a problem — the blocking `tasks/result` + `handle_elicitation`
+> connection lifetime — that **no longer exists** in v2 (no `tasks/result`, no server-initiated
+> elicitation). See [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md) and
+> [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md). Kept for history; the v2 approach is the
+> *current experiment*, not a permanent move off FastMCP.
+
 ## Context
 
 `handle_elicitation` currently awaits `self._mcp.get_task_result(task_id)` directly, which blocks until the entire InvoiceWorkflow completes (PAID/FAILED/REJECTED). The MCP server's `tasks/result` handler signals the workflow, then calls `await handle.result()` waiting for terminal state — the client's connection stays open this entire time.

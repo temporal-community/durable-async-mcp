@@ -140,13 +140,20 @@ For the repositioned thesis argument (why durable execution is the substrate the
 protocol's edge semantics presuppose — "stateless wire, stateful edges"), see
 [`../design/durable-client-thesis-after-stateless-redesign.md`](../design/durable-client-thesis-after-stateless-redesign.md).
 
-## TODO: migrate the implementation to the 2026-07-28 spec
+## DONE (2026-06-20): migrated to the 2026-07-28 Tasks extension
 
-**Gated on:** a `modelcontextprotocol/python-sdk` (and FastMCP) release implementing the
-2026-07-28 spec. Not available as of 2026-05-31 — only the spec RC is published. Revisit when
-the SDK ships RC/stable support.
+**Outcome:** rather than wait for SDK support, we *authored* the Tasks extension as a generic,
+Temporal-backed implementation in `mcp_tasks_temporal/` (distributed as a Temporal Plugin), with the
+invoice app as its consumer. Built against `mcp==2.0.0a2`. The SDK alpha **deliberately omits** the
+tasks extension (it ships only the `extensions` capability container), so the wire types and `tasks/*`
+handlers are hand-written; `tools/call` returning a bare `CreateTaskResult` needs a narrow shim
+(`_sdk_compat`) — see the empirical spike in [`v2-alpha-spike-findings.md`](v2-alpha-spike-findings.md)
+and the plan in [`../plans/temporal-tasks-extension.md`](../plans/temporal-tasks-extension.md).
 
-When the SDK is available:
+Net result: the blocking `tasks/result`, server-initiated elicitation, the sequential-reader
+concurrency workaround, and `tasks/list` are all gone; HITL is pull-based (`input_required` →
+`tasks/get` `inputRequests` → `tasks/update`). The original migration checklist (now complete),
+for reference:
 
 1. **Confirm shapes** (`CreateTaskResult`, `resultType: "task"`, `inputRequests`,
    `inputResponses`, status values, `ttlMs`, `pollIntervalMs`) against the released

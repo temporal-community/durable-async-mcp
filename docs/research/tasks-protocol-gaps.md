@@ -1,5 +1,11 @@
 # MCP Tasks Protocol Gaps (SEP-1686)
 
+> **Note (predates v2).** Documents gaps in the 2025-11-25 Tasks feature (SEP-1686). The 2026-07-28
+> redesign resolves several: blocking `tasks/result` removed, server-initiated elicitation gone (no
+> sequential-reader bottleneck), `tasks/list` removed. Still a valid analysis of the older spec — see
+> [`mcp-2026-07-28-spec-impact.md`](mcp-2026-07-28-spec-impact.md) and
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md).
+
 Research notes from investigating the MCP Tasks specification (experimental, as of 2026-03).
 
 ## Gap 1: `tasks/list` Has No Filtering or Tool Association

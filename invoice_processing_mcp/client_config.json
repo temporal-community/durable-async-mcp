@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "invoice_processor": {
+      "command": "python",
+      "args": ["-m", "invoice_processing_mcp.server"],
+      "env": {
+        "TEMPORAL_ADDRESS": "localhost:7233"
+      }
+    }
+  }
+}

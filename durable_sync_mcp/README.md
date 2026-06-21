@@ -1,6 +1,8 @@
 # Durable Sync MCP Server
 
-A synchronous MCP server for invoice processing, designed for use with Claude Desktop over stdio. Unlike the `async_mcp` implementation, this server does **not** use MCP Tasks — instead it exposes individual tools that Claude orchestrates directly.
+A synchronous MCP server for invoice processing, designed for use with Claude Desktop over stdio. Unlike the task-augmented `invoice_processing_mcp/` implementation, this server does **not** use MCP Tasks — instead it exposes individual tools that Claude orchestrates directly.
+
+> **Note:** this server is still FastMCP-based (`mcp.server.fastmcp`, removed in `mcp` v2) and has **not** been migrated to the v2 cutover, so it won't import in the main venv. See the durable_sync_mcp note in the root `CLAUDE.md`.
 
 ## Tools
 

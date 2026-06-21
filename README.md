@@ -14,18 +14,18 @@ Start here. The core business logic: an invoice processing workflow with ERP val
 
 The simplest MCP integration. Four individual tools (`process_invoice`, `approve_invoice`, `reject_invoice`, `invoice_status`) that the LLM orchestrates directly. Designed for **Claude Desktop** over stdio. The agent decides when to check status and when to approve, likely with human involvement — the MCP server is a thin pass-through to Temporal.
 
-### 3. [`async_mcp/`](async_mcp/README.md) — MCP Tasks + Elicitation
+### 3. [`invoice_processing_mcp/`](invoice_processing_mcp/README.md) — MCP Tasks extension (Temporal-backed)
 
-The most advanced integration. A single `process_invoice` tool using **MCP Tasks** for async execution and **MCP Elicitation** for human-in-the-loop approvals. Custom task handlers map the MCP task lifecycle directly to Temporal workflows (workflow ID = task ID).
+The most advanced integration. A single `process_invoice` tool using the **MCP Tasks extension** (`io.modelcontextprotocol/tasks`, 2026-07-28 draft) for async execution with human-in-the-loop approval surfaced as `input_required` and answered via `tasks/update`. The extension is implemented generically in [`mcp_tasks_temporal/`](mcp_tasks_temporal/) (distributed as a Temporal Plugin) and mapped to Temporal workflows (workflow ID = task ID). The `mcp` v2 SDK omits the extension, so it is hand-written — see [`docs/research/v2-alpha-spike-findings.md`](docs/research/v2-alpha-spike-findings.md).
 
-The client side uses a **Temporal-based worker** (`async_mcp/client_worker/`) that manages the full MCP task lifecycle durably — one `TaskTrackerWorkflow` per task, with a separate UI process that communicates only through Temporal signals and queries. This eliminates hand-rolled polling loops and makes the client as durable as the server.
+The client side (`invoice_processing_mcp/client/`) uses a **Temporal-based worker** that manages the full MCP task lifecycle durably — one `TaskTrackerWorkflow` per task, adopted with a single `MCPTasksClientPlugin`, with a separate UI process that communicates only through Temporal signals and queries. This eliminates hand-rolled polling loops and makes the client as durable as the server.
 
 ## Prerequisites
 
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/) for Python project management
 - Temporal server ([Local Setup Guide](https://learn.temporal.io/getting_started/))
-- An OpenAI API key (for the async MCP CLI client)
+- No API key needed (the durable client is LLM-free)
 
 ## Setup
 
@@ -34,7 +34,7 @@ git clone https://github.com/temporal-community/durable-async-mcp.git
 cd durable-async-mcp
 uv venv
 source .venv/bin/activate
-uv pip install -e .
+uv pip install -e ".[dev]"   # installs mcp==2.0.0a2 (pinned)
 ```
 
 Each subdirectory has its own README with detailed instructions for running that demo.
@@ -42,13 +42,14 @@ Each subdirectory has its own README with detailed instructions for running that
 ## Repository Structure
 
 ```
-bizservice/          Temporal workflows, activities, worker, and CLI
-durable_sync_mcp/    MCP server with synchronous tools (Claude Desktop)
-async_mcp/           MCP server using Tasks + Elicitation
-  client_worker/     Durable Temporal-based client (worker + UI)
-  mcp_client/        Legacy LLM-driven CLI client (OpenAI Responses API)
-samples/             Sample invoice JSON files
-docs/                Design docs, research, and plans
+bizservice/             Temporal workflows, activities, worker, and CLI
+mcp_tasks_temporal/     Reusable Temporal-backed MCP Tasks extension (+ client Temporal Plugin)
+durable_sync_mcp/       FastMCP synchronous-tools server (not migrated to v2)
+invoice_processing_mcp/ Invoice app (consumer of mcp_tasks_temporal):
+  server/               The MCP server (process_invoice; InvoiceTaskBackend, workflow ID = task ID)
+  client/               The durable client application (Temporal worker + CLI)
+samples/                Sample invoice JSON files
+docs/                   Design docs, research, and plans
 ```
 
 ## Accompanying materials

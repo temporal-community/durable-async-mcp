@@ -1,5 +1,11 @@
 # MCP Tasks Limitations Research
 
+> **Note (predates v2).** Analyzes the 2025-11-25 experimental Tasks feature (SEP-1686). The
+> 2026-07-28 redesign (Tasks-as-extension) changed the landscape and addresses several of these gaps.
+> Still a valid analysis of the older spec — see
+> [`mcp-2026-07-28-spec-impact.md`](mcp-2026-07-28-spec-impact.md) and
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md).
+
 Research conducted 2026-03-29. Focused on limitations of MCP Tasks (SEP-1686) for agent orchestration, client-driven task control, long-running workflow support, and the mental model gap between "atomic job" and "collaborative workflow."
 
 ## 1. Core GitHub Issues and Proposals

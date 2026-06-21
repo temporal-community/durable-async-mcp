@@ -1,5 +1,12 @@
 # MCP Tasks Architecture — Invoice Processing
 
+> **⚠️ Historical / superseded.** Describes the pre-v2 FastMCP design (2025-11-25 Tasks / SEP-1686):
+> `temporal_task_handlers.py`, blocking `tasks/result`, `ctx.elicit()`, `tasks/list`. Current
+> direction: the Temporal-backed **Tasks extension** in
+> [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md) — see
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md). Kept for history; the v2 approach is the
+> *current experiment*, not a permanent move off FastMCP.
+
 ## Overview
 
 This document describes the architecture of the `mcp-tasks` branch, which uses MCP Tasks (SEP-1686) and MCP Elicitation for async invoice processing. Custom Temporal-backed task handlers replace FastMCP's default Docket/Redis layer, mapping the MCP task lifecycle directly to Temporal workflow operations.

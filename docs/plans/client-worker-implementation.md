@@ -1,5 +1,12 @@
 # Plan: Client-Side Temporal Worker for MCP Task Management
 
+> **⚠️ Historical / superseded.** This planned the bespoke `async_mcp/client_worker/` (using
+> `fastmcp.Client`, `_elicitation_handler`, etc.). It was superseded by the generic, reusable client
+> in [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md) — see
+> [`temporal-tasks-extension.md`](temporal-tasks-extension.md) and
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md). Kept for history; the v2 approach is the
+> *current experiment*, not a permanent move off FastMCP.
+
 ## Context
 
 The existing `async_mcp/mcp_client/` is a stateless LLM-driven CLI that hand-rolls polling loops and elicitation handling in Python. It has no durability guarantees: crashes lose task state, reconnection requires custom code, and human-in-the-loop approval is coupled to the current process.

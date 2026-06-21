@@ -28,9 +28,9 @@ classifiers = [
 ]
 
 dependencies = [
-    "temporalio>=1.0.0",
-    "fastmcp[tasks]>=2.14.0",  # Requires task support (SEP-1686)
-    "openai>=1.0.0",
+    "temporalio>=1.19.0",  # Plugins API (temporalio.plugin.SimplePlugin)
+    "mcp[cli]==2.0.0a2",   # v2 alpha; pinned (unpinned resolves to v1). Tasks extension hand-implemented in mcp_tasks_temporal.
+    "click>=8.0",
 ]
 
 [project.optional-dependencies]
@@ -75,7 +75,7 @@ extend-exclude = '''
 profile = "black"
 multi_line_output = 3
 line_length = 88
-known_first_party = ["activities", "workflows", "server", "worker", "mcp_client"]
+known_first_party = ["bizservice", "invoice_processing_mcp", "mcp_tasks_temporal"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -93,7 +93,7 @@ warn_unreachable = true
 strict_equality = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["mcp_tasks_temporal/tests", "invoice_processing_mcp/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

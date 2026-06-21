@@ -1,5 +1,12 @@
 # Tool Architecture — Server Tools vs Client-Side Task Protocol Bridges
 
+> **⚠️ Historical / superseded.** Describes the pre-v2 design with client-side tools wrapping
+> `tasks/list` / `tasks/result` and the `mcp_client/` CLI — all removed in v2. Current direction: the
+> Temporal-backed **Tasks extension** in [`mcp_tasks_temporal/`](../../mcp_tasks_temporal/README.md)
+> (generic `TaskTrackerWorkflow`, no app-specific client tools) — see
+> [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md). Kept for history; the v2 approach is the
+> *current experiment*, not a permanent move off FastMCP.
+
 ## Overview
 
 The LLM sees four tools, but they come from two different sources and are handled differently at execution time.
