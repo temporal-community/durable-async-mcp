@@ -1,9 +1,10 @@
-# Invoice Processing MCP (Tasks extension, Temporal-backed)
+# Invoice Processing MCP (FastMCP tasks, Temporal-backed)
 
 The invoice-processing application: an **MCP server** that exposes `process_invoice` via the
-**MCP Tasks extension** (`io.modelcontextprotocol/tasks`), and a **durable client** that drives it.
-Both are thin consumers of the reusable [`mcp_tasks_temporal`](../mcp_tasks_temporal/README.md)
-library; the Temporal workflow ID *is* the MCP task ID.
+**FastMCP task protocol** (SEP-1686), and a **durable client** that drives it. Both are thin
+consumers of the reusable [`mcp_tasks_temporal`](../mcp_tasks_temporal/README.md) library; the
+Temporal workflow ID *is* the MCP task ID. HITL is **server-push elicitation** (the server pushes
+`elicitation/create` during `tasks/result`).
 
 Two components:
 
@@ -115,47 +116,49 @@ Note the back-office steps complete *while* the payment task is still pending �
 durable work concurrently, which is the point of the orchestrator. The HITL prompts are still answered
 against the child `TaskTrackerWorkflow` (the UI discovers it by type); the parent just awaits it.
 
-## What happens (v2 lifecycle — pure polling, elicitation as data)
+## What happens (lifecycle — status polling + server-push elicitation)
 
 1. **Start** — `submit` starts a `PurchaseOrderWorkflow`, which records goods receipt and then starts
    a *child* `TaskTrackerWorkflow(tool_name="process_invoice", arguments={...})`. The child's
-   `start_task` activity calls `tools/call` (declaring the tasks extension in `_meta`); the server's
-   `InvoiceTaskBackend.start` launches an `InvoiceWorkflow` and returns a `CreateTaskResult`
-   (taskId = workflow ID). The parent then runs its remaining back-office activities **concurrently**
-   with the pending child (`asyncio.gather`).
+   `start_task` activity calls `tools/call` with `task=True`; the server's `InvoiceTaskBackend.start`
+   launches an `InvoiceWorkflow` and returns a task stub (taskId = workflow ID). The parent then runs
+   its remaining back-office activities **concurrently** with the pending child (`asyncio.gather`).
 2. **Validate** — the bizservice worker validates the invoice; `TaskTrackerWorkflow` polls `tasks/get`
    (`poll_task`), and `InvoiceTaskBackend.get_state` maps the workflow status → MCP task status.
-3. **Approval surfaces as data** — at `PENDING-APPROVAL` the task is `input_required` and `tasks/get`
-   carries an `inputRequests` map (the approve/reject elicitation, key `approval`). The workflow
-   stores it.
+3. **Approval is pushed** — at `PENDING-APPROVAL` the task is `input_required`; the child runs its
+   `handle_elicitation` activity, which opens `tasks/result`. The server **pushes** an
+   `elicitation/create` (the approve/reject form, key `approval`, tagged with `x-task-id` +
+   `x-request-key`). The bound `_elicitation_handler` signals `elicitation_received`, surfacing the
+   `inputRequests` for the UI.
 4. **You decide** — `list` queries `get_pending_input`, the UI renders the prompt, and signals
-   `user_decision` with the `inputResponses`.
-5. **Submit** — the child's `submit_task_input` activity calls `tasks/update`, which
-   `InvoiceTaskBackend.submit_input` turns into an `ApproveInvoice` / `RejectInvoice` signal.
+   `user_decision` with the `inputResponses`. The handler reads it and returns an `ElicitResult`; the
+   client then cancels `tasks/result` and resumes polling.
+5. **Submit** — the elicitation answer reaches `InvoiceTaskBackend.submit_input`, which turns it into
+   an `ApproveInvoice` / `RejectInvoice` signal.
 6. **Reconcile + 2nd gate (large invoices)** — after approval `InvoiceWorkflow` runs the slow
    `reconcile_with_erp` step (the client polls several times), and for invoices over
    `COST_CENTER_THRESHOLD` ($5000) surfaces a **second** `input_required` round under a distinct key
-   `cost-center-coding` (a multi-field form). Answered the same way, it signals `SubmitCostCenter`.
+   `cost-center-coding` (a multi-field form), pushed the same way and signalling `SubmitCostCenter`.
 7. **Pay & complete** — the bizservice worker pays line items in parallel; the child keeps polling
    until `tasks/get` returns `completed` (`PAID`). When both the child and the back-office work finish,
    the `PurchaseOrderWorkflow` completes with `fulfilled`.
 
-There is **no server-initiated elicitation** and no `tasks/result` — both were removed in v2.
-Multi-round HITL relies on each `inputRequests` key being unique over the task's lifetime
-(`approval`, then `cost-center-coding`).
+Multi-round HITL relies on each inputRequest key being unique over the task's lifetime (`approval`,
+then `cost-center-coding`); the `x-request-key` carried in the pushed schema routes each answer.
 
 ## Available tools
 
-- **`process_invoice`** — task-augmented. With the tasks extension declared, `tools/call` returns a
-  `CreateTaskResult` (a task handle) instead of the answer; the client polls `tasks/get`, answers any
-  `inputRequests` via `tasks/update`, and reads the result from the terminal `tasks/get`.
+- **`process_invoice`** — task-augmented (`task=TaskConfig(mode="required")`). `tools/call` returns a
+  task handle instead of the answer; the client polls `tasks/get` for status and, on `input_required`,
+  opens `tasks/result` to receive the server-pushed `elicitation/create` and answer it.
 
 ## Architecture
 
 ### `server/server.py`
-`build_server(client)` creates a `mcp.server.lowlevel.Server`, exposes `process_invoice` via
-`on_list_tools`, and calls `register_tasks_extension(server, InvoiceTaskBackend(client),
-task_tools={"process_invoice"})`. Served over stdio.
+`build_server(client)` creates a `FastMCP("invoice_processor")` with `process_invoice`
+(`task=TaskConfig(mode="required")`) and calls `register_tasks_extension(mcp,
+InvoiceTaskBackend(client), task_tools={"process_invoice"})`. Served over stdio
+(`mcp.run_async(transport="stdio")`).
 
 ### `server/invoice_backend.py`
 `InvoiceTaskBackend` implements the `TaskBackend` protocol — **the mapping layer between two state
@@ -167,14 +170,15 @@ models**: `InvoiceWorkflow`'s domain *workflow state* and the MCP *task state*.
   terminal `result`; on `FAILED` an `error`
 - `submit_input` → routes by key: `approval` → `ApproveInvoice`/`RejectInvoice`; `cost-center-coding`
   → `SubmitCostCenter(content)` (or `RejectInvoice` on decline/cancel)
+- `wait_result` → blocks until the workflow is terminal and returns its `CallToolResult` payload
 - `cancel` → cancels the workflow
 
 ### `client/worker.py`
-Reads `client_config.json` into `StdioServerParameters` and runs
+Reads `client_config.json` into a config dict and runs
 `Worker(client, task_queue=models.TASK_QUEUE, workflows=[PurchaseOrderWorkflow],
-activities=[<back-office>], plugins=[MCPTasksClientPlugin(server_params)])`. The plugin's
+activities=[<back-office>], plugins=[MCPTasksClientPlugin(config, client)])`. The plugin's
 `TaskTrackerWorkflow` + wire activities are **merged** with the explicit lists — do **not** re-list
-`TaskTrackerWorkflow`. The plugin owns the MCP stdio session.
+`TaskTrackerWorkflow`. The plugin owns the FastMCP session.
 
 ### `client/purchase_order_workflow.py`
 `PurchaseOrderWorkflow` — the parent business process. Records goods receipt, starts `process_invoice`
@@ -207,6 +211,6 @@ multi-field schemas (optional fields skippable, enums validated).
 ## Tests
 
 ```bash
-uv run pytest invoice_processing_mcp/tests/   # InvoiceTaskBackend mapping + server wiring
-uv run pytest mcp_tasks_temporal/tests/       # the reusable extension + client
+uv run pytest invoice_processing_mcp/tests/   # InvoiceTaskBackend mapping + in-memory server wiring
+uv run pytest mcp_tasks_temporal/tests/       # the reusable task protocol + client
 ```

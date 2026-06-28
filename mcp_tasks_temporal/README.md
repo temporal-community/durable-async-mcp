@@ -1,13 +1,20 @@
 # mcp_tasks_temporal
 
-A reusable, **Temporal-backed implementation of the MCP Tasks extension**
-(`io.modelcontextprotocol/tasks`, the 2026-07-28 draft). It gives you:
+A reusable, **Temporal-backed implementation of the MCP task protocol on FastMCP**
+(SEP-1686, `fastmcp==2.14.3`). It gives you:
 
-- **Server side** — wire the tasks extension (`tasks/get` / `tasks/update` / `tasks/cancel` plus a
-  task-returning `tools/call`) onto an `mcp.server.lowlevel.Server` and back it with any durable job
-  system via a small `TaskBackend` protocol.
+- **Server side** — `register_tasks_extension(mcp, backend, task_tools=...)` overwrites FastMCP's task
+  handlers (`tools/call` + `tasks/get` / `tasks/result` / `tasks/cancel`) with ones backed by any
+  durable job system via a small `TaskBackend` protocol. HITL is **server-push elicitation**: while a
+  task is `input_required`, `tasks/result` pushes an `elicitation/create`.
 - **Client side** — a durable client packaged as a **Temporal Plugin**: one `TaskTrackerWorkflow` per
   in-flight task (the durable task handle), adopted with a single `plugins=[...]` entry.
+
+> **Status (2026-06-28):** this package reverted from the v2 alpha (`mcp==2.0.0a2`) pull-based tasks
+> *extension* to the FastMCP push-elicitation task protocol. The sections below that describe the v2
+> wire types (`wire.py`, `_sdk_compat.py`), `tasks/update`, capability `_meta`, and "Path to native"
+> are **historical** — the current API is `tasks/result` push elicitation with `x-task-id` /
+> `x-request-key` routing, mirrored in `CLAUDE.md` and `docs/decisions/003-revert-to-v1-fastmcp-tasks.md`.
 
 > **Why this package exists.** The `mcp==2.0.0a2` SDK ships the `extensions` capability container but
 > **deliberately omits the tasks extension itself** — this package *is* that implementation
@@ -92,6 +99,13 @@ class MyBackend:  # structural — satisfies the TaskBackend protocol
 `status_message`, `ttl_ms`, `poll_interval_ms`, `input_requests`, `result`, `error`. Populate
 `input_requests` while `input_required`, `result` when `completed`, `error` when `failed`. The
 invoice app's worked mapping is `invoice_processing_mcp/server/invoice_backend.py` (`TEMPORAL_TO_MCP_STATE` + `get_state`).
+
+> **Forward compatibility.** `input_requests` is intentionally the **native v2 Tasks `inputRequests`
+> shape** — a keyed map of `InputRequest(method="elicitation/create", params={message,
+> requestedSchema})`. Your backend speaks v2 regardless of transport: on this FastMCP layer the server
+> *pushes* that request via `elicit_form` during `tasks/result` (v1), but re-targeting native v2 would
+> just *return* `state.input_requests` in `tasks/get` — your `TaskBackend` and the client UI surface
+> stay unchanged. See `docs/decisions/003-revert-to-v1-fastmcp-tasks.md` → "Forward compatibility".
 
 > **Durability contract.** The spec requires the task be *durably created before the response is
 > sent*. With Temporal, `await client.start_workflow(...)` satisfies this — it returns only after the

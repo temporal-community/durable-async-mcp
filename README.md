@@ -14,9 +14,9 @@ Start here. The core business logic: an invoice processing workflow with ERP val
 
 The simplest MCP integration. Four individual tools (`process_invoice`, `approve_invoice`, `reject_invoice`, `invoice_status`) that the LLM orchestrates directly. Designed for **Claude Desktop** over stdio. The agent decides when to check status and when to approve, likely with human involvement — the MCP server is a thin pass-through to Temporal.
 
-### 3. [`invoice_processing_mcp/`](invoice_processing_mcp/README.md) — MCP Tasks extension (Temporal-backed)
+### 3. [`invoice_processing_mcp/`](invoice_processing_mcp/README.md) — MCP tasks (Temporal-backed)
 
-The most advanced integration. A single `process_invoice` tool using the **MCP Tasks extension** (`io.modelcontextprotocol/tasks`, 2026-07-28 draft) for async execution with human-in-the-loop approval surfaced as `input_required` and answered via `tasks/update`. The extension is implemented generically in [`mcp_tasks_temporal/`](mcp_tasks_temporal/) (distributed as a Temporal Plugin) and mapped to Temporal workflows (workflow ID = task ID). The `mcp` v2 SDK omits the extension, so it is hand-written — see [`docs/research/v2-alpha-spike-findings.md`](docs/research/v2-alpha-spike-findings.md).
+The most advanced integration. A single `process_invoice` tool using the **FastMCP task protocol** (SEP-1686, `fastmcp==2.14.3`) for async execution with human-in-the-loop approval: while a task is `input_required`, the server **pushes** an `elicitation/create` during `tasks/result` and the client answers it. The protocol is implemented generically in [`mcp_tasks_temporal/`](mcp_tasks_temporal/) (distributed as a Temporal Plugin) and mapped to Temporal workflows (workflow ID = task ID). See [`docs/decisions/003-revert-to-v1-fastmcp-tasks.md`](docs/decisions/003-revert-to-v1-fastmcp-tasks.md) for how this reverted from the earlier v2 alpha pull-based extension.
 
 The client side (`invoice_processing_mcp/client/`) uses a **Temporal-based worker** that manages the full MCP task lifecycle durably — one `TaskTrackerWorkflow` per task, adopted with a single `MCPTasksClientPlugin`, with a separate UI process that communicates only through Temporal signals and queries. This eliminates hand-rolled polling loops and makes the client as durable as the server. On top of that, a parent **`PurchaseOrderWorkflow`** shows the MCP task as just *one step* of a larger durable business process: it runs `process_invoice` as a child `TaskTrackerWorkflow` while doing back-office work (inventory, notifications, PO close) concurrently, and the invoice flow itself adds a second human gate (cost-center coding) for large invoices. A NiceGUI **status board** (`python -m invoice_processing_mcp.client.gui`) visualizes every purchase order and its invoice task's live lifecycle state, and answers pending human-in-the-loop questions inline.
 
@@ -34,7 +34,7 @@ git clone https://github.com/temporal-community/durable-async-mcp.git
 cd durable-async-mcp
 uv venv
 source .venv/bin/activate
-uv pip install -e ".[dev]"   # installs mcp==2.0.0a2 (pinned)
+uv pip install -e ".[dev]"   # installs fastmcp==2.14.3 (pinned; pulls mcp 1.x)
 ```
 
 Each subdirectory has its own README with detailed instructions for running that demo.
@@ -43,8 +43,8 @@ Each subdirectory has its own README with detailed instructions for running that
 
 ```
 bizservice/             Temporal workflows, activities, worker, and CLI
-mcp_tasks_temporal/     Reusable Temporal-backed MCP Tasks extension (+ client Temporal Plugin)
-durable_sync_mcp/       FastMCP synchronous-tools server (not migrated to v2)
+mcp_tasks_temporal/     Reusable Temporal-backed FastMCP task protocol (+ client Temporal Plugin)
+durable_sync_mcp/       FastMCP synchronous-tools server (out of scope, untested)
 invoice_processing_mcp/ Invoice app (consumer of mcp_tasks_temporal):
   server/               The MCP server (process_invoice; InvoiceTaskBackend, workflow ID = task ID)
   client/               The durable client application (Temporal worker + CLI)

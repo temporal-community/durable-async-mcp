@@ -28,10 +28,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "temporalio>=1.19.0",  # Plugins API (temporalio.plugin.SimplePlugin)
-    "mcp[cli]==2.0.0a2",   # v2 alpha; pinned (unpinned resolves to v1). Tasks extension hand-implemented in mcp_tasks_temporal.
+    "temporalio>=1.19.0",      # Plugins API (temporalio.plugin.SimplePlugin)
+    "fastmcp[tasks]==2.14.3",  # FastMCP with task support (SEP-1686); backs mcp_tasks_temporal's tasks protocol. Pinned: 2.14.7 dropped the `tasks` extra and 3.x changed the task wire protocol.
     "click>=8.0",
-    "nicegui>=2.0",        # browser GUI status board (invoice_processing_mcp.client.gui)
+    "nicegui>=2.0",            # browser GUI status board (invoice_processing_mcp.client.gui)
 ]
 
 [project.optional-dependencies]

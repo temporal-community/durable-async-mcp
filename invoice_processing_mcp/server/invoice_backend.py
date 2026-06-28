@@ -7,13 +7,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from mcp.shared.exceptions import MCPError
-from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+from mcp.shared.exceptions import McpError
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 from temporalio.client import Client
 
 from bizservice.workflows import InvoiceWorkflow
-from mcp_tasks_temporal.backend import TaskState
-from mcp_tasks_temporal.wire import InputRequest, InputResponse
+from mcp_tasks_temporal.backend import InputRequest, InputResponse, TaskState
 
 INVOICE_TOOL = "process_invoice"
 INVOICE_TASK_QUEUE = "invoice-task-queue"
@@ -98,12 +97,12 @@ def _cost_center_request(invoice: dict[str, Any]) -> InputRequest:
 
 
 def _terminal_result(invoice_status: str) -> dict[str, Any]:
+    """A CallToolResult-shaped payload describing a terminal invoice outcome."""
     return {
         "content": [
             {"type": "text", "text": f"Invoice processing result: {invoice_status}"}
         ],
-        "isError": False,
-        "resultType": "complete",
+        "isError": invoice_status == "FAILED",
     }
 
 
@@ -171,7 +170,9 @@ class InvoiceTaskBackend:
             desc = await handle.describe()
             invoice_status = await handle.query(InvoiceWorkflow.GetInvoiceStatus)
         except Exception as e:
-            raise MCPError(INVALID_PARAMS, f"Task {task_id} not found") from e
+            raise McpError(
+                ErrorData(code=INVALID_PARAMS, message=f"Task {task_id} not found")
+            ) from e
 
         mcp_state = TEMPORAL_TO_MCP_STATE.get(invoice_status, "failed")
         created = (
@@ -223,6 +224,12 @@ class InvoiceTaskBackend:
             await handle.signal(InvoiceWorkflow.ApproveInvoice)
         else:
             await handle.signal(InvoiceWorkflow.RejectInvoice)
+
+    async def wait_result(self, task_id: str) -> dict[str, Any]:
+        # Block until the InvoiceWorkflow is terminal; it returns its final status string
+        # (PAID/REJECTED/FAILED). The client typically cancels tasks/result before this returns.
+        final_status = await self._client.get_workflow_handle(task_id).result()
+        return _terminal_result(final_status)
 
     async def cancel(self, task_id: str) -> None:
         await self._client.get_workflow_handle(task_id).cancel()

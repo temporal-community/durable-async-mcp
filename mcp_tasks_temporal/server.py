@@ -1,131 +1,192 @@
-# ABOUTME: Server-side wiring for the MCP Tasks extension onto an mcp.server.lowlevel.Server.
-# register_tasks_extension installs the compat shim, advertises the capability, and wires tasks/*.
+# ABOUTME: Server-side wiring for the MCP Tasks protocol onto a FastMCP server, driven by a TaskBackend.
+# register_tasks_extension overwrites FastMCP's task handlers (tasks/get/result/cancel + tools/call) with
+# Temporal-backed ones: poll maps backend state, and input_required pushes elicitation during tasks/result.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import Any
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, cast
 
-from mcp import types
-from mcp.server.lowlevel.server import Server
-from mcp.shared.exceptions import MCPError
-from mcp.types import INVALID_PARAMS
-
-from mcp_tasks_temporal._sdk_compat import install_tasks_result_passthrough
-from mcp_tasks_temporal.backend import TaskBackend, TaskState
-from mcp_tasks_temporal.wire import (
-    EXTENSION_ID,
-    CancelTaskRequestParams,
-    CreateTaskResult,
-    GetTaskRequestParams,
+import fastmcp.server.context
+from mcp.shared.exceptions import McpError
+from mcp.types import (
+    INVALID_PARAMS,
+    CallToolRequest,
+    CallToolResult,
+    CancelTaskRequest,
+    CancelTaskResult,
+    ErrorData,
+    GetTaskPayloadRequest,
+    GetTaskRequest,
     GetTaskResult,
-    UpdateTaskRequestParams,
-    declares_tasks_extension,
+    ServerResult,
+    TextContent,
 )
 
-CallToolHandler = Callable[[Any, types.CallToolRequestParams], Awaitable[Any]]
+from mcp_tasks_temporal.backend import TaskBackend, TaskState
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
+
+# MCP task lifecycle states that are terminal (no further work or input).
+TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 
 
-def _create_task_result(state: TaskState) -> dict[str, Any]:
-    return CreateTaskResult(
-        task_id=state.task_id,
-        status=state.status,
-        status_message=state.status_message,
-        created_at=state.created_at,
-        last_updated_at=state.last_updated_at,
-        ttl_ms=state.ttl_ms,
-        poll_interval_ms=state.poll_interval_ms,
-    ).to_wire()
+def _require_task_id(params: Any) -> str:
+    task_id = params.taskId
+    if not task_id:
+        raise McpError(
+            ErrorData(code=INVALID_PARAMS, message="Missing required parameter: taskId")
+        )
+    return str(task_id)
 
 
-def _get_task_result(state: TaskState) -> dict[str, Any]:
-    return GetTaskResult(
-        task_id=state.task_id,
-        status=state.status,
-        status_message=state.status_message,
-        created_at=state.created_at,
-        last_updated_at=state.last_updated_at,
-        ttl_ms=state.ttl_ms,
-        poll_interval_ms=state.poll_interval_ms,
-        input_requests=state.input_requests,
-        result=state.result,
-        error=state.error,
-    ).to_wire()
+def _to_datetime(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    return datetime.fromisoformat(value)
+
+
+def _terminal_call_tool_result(state: TaskState) -> CallToolResult:
+    """Build the CallToolResult a terminal task returns from tasks/result."""
+    meta = {"modelcontextprotocol.io/related-task": {"taskId": state.task_id}}
+    if state.status == "failed" or state.error is not None:
+        message = (state.error or {}).get("message", "Task failed")
+        return CallToolResult(
+            content=[TextContent(type="text", text=message)], isError=True, _meta=meta
+        )
+    if state.result is not None:
+        result = CallToolResult.model_validate(state.result)
+        result.meta = {**(result.meta or {}), **meta}
+        return result
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"Task {state.status}")], _meta=meta
+    )
 
 
 def register_tasks_extension(
-    server: Server,
+    mcp: FastMCP,
     backend: TaskBackend,
     *,
     task_tools: set[str] | None = None,
-    fallback_call_tool: CallToolHandler | None = None,
 ) -> None:
-    """Wire the tasks extension onto a lowlevel Server.
+    """Wire the MCP Tasks protocol onto a FastMCP server, backed by `backend`.
 
-    - Installs the alpha compat shim (so a bare CreateTaskResult survives tools/call validation).
-    - Advertises `io.modelcontextprotocol/tasks` in server capabilities.
-    - Wraps `tools/call`: for a task tool (any tool if `task_tools` is None), requires the client
-      to have declared the extension in `_meta` (per spec MUST), then starts the job via `backend`
-      and returns a CreateTaskResult. Non-task tools delegate to `fallback_call_tool` (or the
-      server's existing tools/call handler).
-    - Registers `tasks/get`, `tasks/update`, `tasks/cancel`.
+    Overwrites FastMCP's (Docket-based) task handlers on the low-level server:
+    - tools/call — for a task tool (any tool if `task_tools` is None), starts the durable job via
+      `backend.start` and returns a task stub (`_meta` taskId + status). Non-task tools delegate
+      to FastMCP's original handler.
+    - tasks/get — maps `backend.get_state` to a GetTaskResult (status only).
+    - tasks/result — when terminal, returns the result; when `input_required`, pushes an
+      `elicitation/create` (the single pending inputRequest, tagged with `x-task-id`/`x-request-key`),
+      applies the answer via `backend.submit_input`, then blocks on `backend.wait_result`.
+    - tasks/cancel — `backend.cancel`.
     """
-    install_tasks_result_passthrough()
-    _advertise_capability(server)
-
-    existing = server.get_request_handler("tools/call")
-    fallback = fallback_call_tool or (existing.handler if existing else None)
+    low_level = mcp._mcp_server
 
     def _is_task_tool(name: str) -> bool:
         return task_tools is None or name in task_tools
 
-    async def on_call_tool(ctx: Any, params: types.CallToolRequestParams) -> Any:
-        if _is_task_tool(params.name):
-            if not declares_tasks_extension(params.meta):
-                raise MCPError(
-                    INVALID_PARAMS,
-                    f"tool {params.name!r} requires the {EXTENSION_ID} extension; "
-                    "declare it in params._meta clientCapabilities.",
+    original_call_tool = low_level.request_handlers[CallToolRequest]
+
+    async def on_call_tool(req: CallToolRequest) -> ServerResult:
+        if not _is_task_tool(req.params.name):
+            return await original_call_tool(req)
+        state = await backend.start(req.params.name, req.params.arguments or {})
+        return ServerResult(
+            CallToolResult(
+                content=[],
+                _meta={
+                    "modelcontextprotocol.io/task": {
+                        "taskId": state.task_id,
+                        "status": state.status,
+                    }
+                },
+            )
+        )
+
+    async def on_tasks_get(req: GetTaskRequest) -> ServerResult:
+        state = await backend.get_state(_require_task_id(req.params))
+        return ServerResult(
+            GetTaskResult(
+                taskId=state.task_id,
+                status=cast(Any, state.status),
+                createdAt=_to_datetime(state.created_at),
+                lastUpdatedAt=_to_datetime(state.last_updated_at),
+                ttl=state.ttl_ms,
+                pollInterval=state.poll_interval_ms,
+                statusMessage=state.status_message,
+            )
+        )
+
+    async def on_tasks_result(req: GetTaskPayloadRequest) -> ServerResult:
+        task_id = _require_task_id(req.params)
+        state = await backend.get_state(task_id)
+
+        if state.status in TERMINAL_STATES:
+            return ServerResult(_terminal_call_tool_result(state))
+
+        if state.status == "input_required" and state.input_requests:
+            key, request = next(iter(state.input_requests.items()))
+            params = request.params
+            # Embed routing hints so the client's elicitation handler can find the right
+            # TaskTrackerWorkflow (x-task-id) and answer the right inputRequest (x-request-key).
+            schema = {
+                **params["requestedSchema"],
+                "x-task-id": task_id,
+                "x-request-key": key,
+            }
+            async with fastmcp.server.context.Context(fastmcp=mcp) as ctx:
+                elicit_response = await ctx.session.elicit_form(
+                    message=params["message"],
+                    requestedSchema=schema,
+                    related_request_id=ctx.request_id,
                 )
-            state = await backend.start(params.name, params.arguments or {})
-            return _create_task_result(state)
-        if fallback is not None:
-            return await fallback(ctx, params)
-        raise MCPError(INVALID_PARAMS, f"unknown tool {params.name!r}")
+            await backend.submit_input(
+                task_id,
+                {
+                    key: {
+                        "action": elicit_response.action,
+                        "content": elicit_response.content,
+                    }
+                },
+            )
+            # Per spec tasks/result blocks until terminal; the client cancels this request after
+            # the elicitation resolves and resumes polling, so this often does not return.
+            result = await backend.wait_result(task_id)
+            return ServerResult(CallToolResult.model_validate(result))
 
-    server.add_request_handler("tools/call", types.CallToolRequestParams, on_call_tool)
+        raise McpError(
+            ErrorData(
+                code=INVALID_PARAMS,
+                message=f"Task not completed yet (current state: {state.status})",
+            )
+        )
 
-    async def on_tasks_get(ctx: Any, params: GetTaskRequestParams) -> dict[str, Any]:
-        return _get_task_result(await backend.get_state(params.task_id))
+    async def on_tasks_cancel(req: CancelTaskRequest) -> ServerResult:
+        task_id = _require_task_id(req.params)
+        state = await backend.get_state(task_id)
+        if state.status in TERMINAL_STATES:
+            raise McpError(
+                ErrorData(
+                    code=INVALID_PARAMS,
+                    message="Cannot cancel task: already in terminal status",
+                )
+            )
+        await backend.cancel(task_id)
+        return ServerResult(
+            CancelTaskResult(
+                taskId=task_id,
+                status="cancelled",
+                createdAt=_to_datetime(state.created_at),
+                lastUpdatedAt=datetime.now(timezone.utc),
+                ttl=state.ttl_ms,
+                pollInterval=state.poll_interval_ms,
+                statusMessage="Task cancelled",
+            )
+        )
 
-    async def on_tasks_update(
-        ctx: Any, params: UpdateTaskRequestParams
-    ) -> dict[str, Any]:
-        await backend.submit_input(params.task_id, params.input_responses)
-        return {}  # empty ack
-
-    async def on_tasks_cancel(
-        ctx: Any, params: CancelTaskRequestParams
-    ) -> dict[str, Any]:
-        await backend.cancel(params.task_id)
-        return {}  # empty ack
-
-    server.add_request_handler("tasks/get", GetTaskRequestParams, on_tasks_get)
-    server.add_request_handler("tasks/update", UpdateTaskRequestParams, on_tasks_update)
-    server.add_request_handler("tasks/cancel", CancelTaskRequestParams, on_tasks_cancel)
-
-
-def _advertise_capability(server: Server) -> None:
-    """Add the tasks extension to the server's advertised capabilities."""
-    orig_get_capabilities = server.get_capabilities
-
-    def get_capabilities(
-        notification_options: Any, experimental_capabilities: Any
-    ) -> types.ServerCapabilities:
-        caps = orig_get_capabilities(notification_options, experimental_capabilities)
-        extensions = dict(getattr(caps, "extensions", None) or {})
-        extensions[EXTENSION_ID] = {}
-        caps.extensions = extensions
-        return caps
-
-    server.get_capabilities = get_capabilities  # type: ignore[method-assign]
+    low_level.request_handlers[CallToolRequest] = on_call_tool
+    low_level.request_handlers[GetTaskRequest] = on_tasks_get
+    low_level.request_handlers[GetTaskPayloadRequest] = on_tasks_result
+    low_level.request_handlers[CancelTaskRequest] = on_tasks_cancel

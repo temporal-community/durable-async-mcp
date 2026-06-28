@@ -1,12 +1,13 @@
-# ABOUTME: MCPTasksClientPlugin packages the durable client (workflow + wire activities + MCP session)
+# ABOUTME: MCPTasksClientPlugin packages the durable client (workflow + wire activities + FastMCP session)
 # as a Temporal Plugin, so a consumer adopts the whole tasks client with one plugins=[...] entry.
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
-from mcp.client.stdio import StdioServerParameters
+from temporalio.client import Client as TemporalClient
 from temporalio.plugin import SimplePlugin
 
 from mcp_tasks_temporal.client.activities import MCPActivities
@@ -17,25 +18,32 @@ PLUGIN_NAME = "io.temporal.mcp-tasks-client"
 
 
 def MCPTasksClientPlugin(
-    server_params: StdioServerParameters, *, name: str = PLUGIN_NAME
+    config: dict[str, Any],
+    temporal_client: TemporalClient,
+    *,
+    name: str = PLUGIN_NAME,
 ) -> SimplePlugin:
     """A Temporal Plugin bundling the durable MCP-tasks client.
 
-    Registers TaskTrackerWorkflow and the wire activities, and — via run_context — opens the MCP
-    stdio session for the worker's lifetime and binds it to the activities. Usage:
+    Registers TaskTrackerWorkflow and the wire activities, and — via run_context — opens the
+    FastMCP client (wired to the activities' elicitation handler) for the worker's lifetime.
+    `temporal_client` lets the elicitation handler signal/query the tracker workflows from
+    FastMCP's receive loop (which has no Temporal activity context). Usage:
 
-        Worker(client, task_queue=models.TASK_QUEUE, plugins=[MCPTasksClientPlugin(server_params)])
+        Worker(client, task_queue=models.TASK_QUEUE, plugins=[MCPTasksClientPlugin(config, client)])
     """
-    activities = MCPActivities()
+    activities = MCPActivities(temporal_client=temporal_client)
 
     @asynccontextmanager
     async def run_context() -> AsyncIterator[None]:
-        async with connect_tasks_session(server_params) as session:
-            activities.bind(session)
+        async with connect_tasks_session(
+            config, activities._elicitation_handler
+        ) as mcp:
+            activities.bind_mcp(mcp)
             try:
                 yield
             finally:
-                activities.bind(None)
+                activities.bind_mcp(None)
 
     return SimplePlugin(
         name,

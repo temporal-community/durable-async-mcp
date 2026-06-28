@@ -6,7 +6,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from mcp_tasks_temporal.wire import InputRequest, InputResponse, TaskStatus
+# MCP task status string ("working" | "input_required" | "completed" | "failed" | "cancelled").
+TaskStatus = str
+
+# An InputResponse is the client's answer to one outstanding inputRequest:
+# {"action": "accept" | "decline" | "cancel", "content": {...} | None}.
+InputResponse = dict[str, Any]
+
+
+@dataclass
+class InputRequest:
+    """One human-input request the server surfaces while a task is `input_required`.
+
+    `method` is the MCP method to satisfy it (`elicitation/create`); `params` carries the
+    elicitation `message` and `requestedSchema`. The server pushes this to the client via
+    `elicitation/create` during tasks/result.
+    """
+
+    method: str
+    params: dict[str, Any]
 
 
 @dataclass
@@ -14,8 +32,7 @@ class TaskState:
     """The MCP-facing state of a task — what the server renders onto the wire.
 
     Distinct from your underlying *workflow/job state*: the backend's job is to map
-    workflow state -> TaskState (status plus the protocol payload). The server turns this
-    into a CreateTaskResult (on start) or a GetTaskResult (on poll). Populate
+    workflow state -> TaskState (status plus the protocol payload). Populate
     `input_requests` while `input_required`, `result` when `completed`, `error` when `failed`.
     """
 
@@ -50,7 +67,16 @@ class TaskBackend(Protocol):
     async def submit_input(
         self, task_id: str, input_responses: dict[str, InputResponse]
     ) -> None:
-        """Apply the client's answers to outstanding inputRequests (drives tasks/update)."""
+        """Apply the client's answers to outstanding inputRequests (drives the elicitation)."""
+        ...
+
+    async def wait_result(self, task_id: str) -> dict[str, Any]:
+        """Block until the job is terminal and return its CallToolResult payload.
+
+        Called by tasks/result after an elicitation is satisfied. Per the MCP Tasks spec
+        tasks/result blocks until terminal; in practice the client cancels the request right
+        after the elicitation resolves and resumes polling, so this often does not return.
+        """
         ...
 
     async def cancel(self, task_id: str) -> None:

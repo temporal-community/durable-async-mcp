@@ -2,7 +2,7 @@
 
 A synchronous MCP server for invoice processing, designed for use with Claude Desktop over stdio. Unlike the task-augmented `invoice_processing_mcp/` implementation, this server does **not** use MCP Tasks — instead it exposes individual tools that Claude orchestrates directly.
 
-> **Note:** this server is still FastMCP-based (`mcp.server.fastmcp`, removed in `mcp` v2) and has **not** been migrated to the v2 cutover, so it won't import in the main venv. See the durable_sync_mcp note in the root `CLAUDE.md`.
+> **Note:** this server uses `mcp.server.fastmcp`, which is available again now that `fastmcp==2.14.3` pulls in `mcp` 1.x, so it imports in the main venv. It is kept out of scope of the tasks demo and is not in the test suite. See the durable_sync_mcp note in the root `CLAUDE.md`.
 
 ## Tools
 

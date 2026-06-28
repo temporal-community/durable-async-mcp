@@ -8,6 +8,10 @@ import uuid
 from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
+from temporalio.worker.workflow_sandbox import (
+    SandboxedWorkflowRunner,
+    SandboxRestrictions,
+)
 
 from invoice_processing_mcp.client import backoffice_activities
 from invoice_processing_mcp.client.purchase_order_workflow import PurchaseOrderWorkflow
@@ -22,49 +26,53 @@ ORDER = {
 
 
 class FakeMCPActivities:
-    """Stubs the MCP wire activities: working -> input_required -> (after update) completed."""
+    """Stubs the MCP wire activities using the server-push model. handle_elicitation surfaces the
+    inputRequests (via the elicitation_received signal) and blocks until the human decision arrives,
+    mirroring the real activity; poll then reports completed once a gate has been answered.
+    """
 
     def __init__(self) -> None:
-        self.submitted: dict | None = None
+        self.client = None  # set to env.client before the worker runs
+        self.elicited = False
 
     @activity.defn(name=models.START_TASK)
     async def start_task(self, inp: models.StartTaskInput) -> str:
         return "task-1"
 
     @activity.defn(name=models.POLL_TASK)
-    async def poll_task(self, task_id: str) -> models.TaskPollResult:
-        if self.submitted is not None:
-            return models.TaskPollResult(
-                status="completed",
-                result={
-                    "content": [{"type": "text", "text": "PAID"}],
-                    "isError": False,
-                },
-            )
-        return models.TaskPollResult(
-            status="input_required",
-            poll_interval_ms=10,
-            input_requests={
+    async def poll_task(self, task_id: str) -> str:
+        return "completed" if self.elicited else "input_required"
+
+    @activity.defn(name=models.HANDLE_ELICITATION)
+    async def handle_elicitation(self, task_id: str) -> str:
+        wf_id = activity.info().workflow_id
+        handle = self.client.get_workflow_handle(wf_id)
+        await handle.signal(
+            "elicitation_received",
+            {
                 "approval": {
                     "method": "elicitation/create",
-                    "params": {"message": "Approve?"},
+                    "params": {"message": "Approve?", "requestedSchema": {}},
                 }
             },
         )
+        for _ in range(200):
+            if await handle.query("get_pending_decision"):
+                self.elicited = True
+                return "elicitation_handled"
+            await asyncio.sleep(0.05)
+        raise RuntimeError("no decision received")
 
-    @activity.defn(name=models.SUBMIT_TASK_INPUT)
-    async def submit_task_input(self, inp: models.SubmitInput) -> None:
-        self.submitted = inp.input_responses
-
-    @activity.defn(name=models.CANCEL_TASK)
-    async def cancel_task(self, task_id: str) -> None:
-        pass
+    @activity.defn(name=models.GET_TASK_RESULT)
+    async def get_task_result(self, task_id: str) -> dict:
+        return {"content": [{"type": "text", "text": "PAID"}], "isError": False}
 
 
 async def _scenario() -> None:
     os.environ["BACKOFFICE_DELAY_SECONDS"] = "0"
     fake = FakeMCPActivities()
     async with await WorkflowEnvironment.start_time_skipping() as env:
+        fake.client = env.client
         async with Worker(
             env.client,
             task_queue="po-test",
@@ -76,9 +84,14 @@ async def _scenario() -> None:
                 backoffice_activities.close_po,
                 fake.start_task,
                 fake.poll_task,
-                fake.submit_task_input,
-                fake.cancel_task,
+                fake.handle_elicitation,
+                fake.get_task_result,
             ],
+            workflow_runner=SandboxedWorkflowRunner(
+                restrictions=SandboxRestrictions.default.with_passthrough_modules(
+                    "beartype"
+                )
+            ),
         ):
             po = await env.client.start_workflow(
                 PurchaseOrderWorkflow.run,

@@ -1,167 +1,181 @@
-# ABOUTME: End-to-end test of the tasks-extension server over the in-memory transport.
-# Drives the full lifecycle (create -> poll -> input_required -> update -> completed) with a fake backend.
+# ABOUTME: End-to-end test of the tasks server over FastMCP's in-memory transport with a fake backend.
+# Drives create -> poll -> input_required(server-push elicitation) -> result, including a two-gate flow.
+
+from __future__ import annotations
 
 from typing import Any
 
 import anyio
-from mcp.client.session import ClientSession
-from mcp.server.lowlevel.server import Server
-from mcp.shared.memory import create_client_server_memory_streams
+from fastmcp import Client, FastMCP
+from fastmcp.client.elicitation import ElicitResult
+from fastmcp.server.tasks import TaskConfig
 
-from mcp_tasks_temporal.backend import TaskState
+from mcp_tasks_temporal.backend import InputRequest, TaskState
 from mcp_tasks_temporal.server import register_tasks_extension
-from mcp_tasks_temporal.wire import InputRequest, InputResponse, client_capability_meta
 
-META = {"_meta": client_capability_meta()}
+NOW = "2026-06-28T00:00:00+00:00"
+
+
+def _state(task_id: str, status: str, **kw: Any) -> TaskState:
+    return TaskState(
+        task_id, status, NOW, NOW, ttl_ms=60000, poll_interval_ms=500, **kw
+    )
+
+
+def _input_request(key: str, message: str, schema: dict[str, Any]) -> InputRequest:
+    return InputRequest(
+        method="elicitation/create",
+        params={"mode": "form", "message": message, "requestedSchema": schema},
+    )
 
 
 class FakeBackend:
-    """In-memory task state machine: working -> input_required -> (after input) completed."""
+    """A scripted backend: walks an explicit list of gates, then completes.
 
-    def __init__(self) -> None:
-        self.tasks: dict[str, dict[str, Any]] = {}
-        self.received_inputs: dict[str, dict[str, InputResponse]] = {}
+    `gates` is an ordered list of (key, message, schema); each is elicited once via tasks/result.
+    """
+
+    def __init__(self, gates: list[tuple[str, str, dict[str, Any]]]) -> None:
+        self._gates = gates
+        self.started: list[tuple[str, dict]] = []
+        self.received: list[tuple[str, dict]] = []
+        self.cancelled = False
+        self._answered = 0
 
     async def start(self, tool_name: str, arguments: dict[str, Any]) -> TaskState:
-        tid = f"task-{len(self.tasks) + 1}"
-        self.tasks[tid] = {"polls": 0, "decided": False, "cancelled": False}
-        return TaskState(tid, "working", "t0", "t0", ttl_ms=60000, poll_interval_ms=500)
+        self.started.append((tool_name, arguments))
+        return _state("task-1", "working", status_message="started")
 
     async def get_state(self, task_id: str) -> TaskState:
-        st = self.tasks[task_id]
-        if st["cancelled"]:
-            return TaskState(task_id, "cancelled", "t0", "t1")
-        st["polls"] += 1
-        if st["decided"]:
-            return TaskState(
+        if self.cancelled:
+            return _state(task_id, "cancelled")
+        if self._answered >= len(self._gates):
+            return _state(
                 task_id,
                 "completed",
-                "t0",
-                "t1",
                 result={
                     "content": [{"type": "text", "text": "PAID"}],
                     "isError": False,
-                    "resultType": "complete",
                 },
             )
-        if st["polls"] == 1:
-            return TaskState(task_id, "working", "t0", "t1", poll_interval_ms=500)
-        return TaskState(
+        key, message, schema = self._gates[self._answered]
+        return _state(
             task_id,
             "input_required",
-            "t0",
-            "t1",
-            input_requests={
-                "approval": InputRequest(
-                    method="elicitation/create",
-                    params={
-                        "mode": "form",
-                        "message": "Approve?",
-                        "requestedSchema": {"type": "object"},
-                    },
-                )
-            },
+            input_requests={key: _input_request(key, message, schema)},
         )
 
-    async def submit_input(
-        self, task_id: str, input_responses: dict[str, InputResponse]
-    ) -> None:
-        self.received_inputs[task_id] = input_responses
-        self.tasks[task_id]["decided"] = True
+    async def submit_input(self, task_id: str, input_responses: dict[str, Any]) -> None:
+        self.received.append((task_id, input_responses))
+        self._answered += 1
+
+    async def wait_result(self, task_id: str) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": "PAID"}], "isError": False}
 
     async def cancel(self, task_id: str) -> None:
-        self.tasks[task_id]["cancelled"] = True
+        self.cancelled = True
 
 
-async def _raw(session: ClientSession, method: str, params: dict[str, Any]) -> Any:
-    return await session._dispatcher.send_raw_request(method, params, {})
+def _build(backend: FakeBackend) -> FastMCP:
+    mcp = FastMCP("test-tasks")
+
+    @mcp.tool(task=TaskConfig(mode="required"))
+    async def process(x: int) -> dict:
+        return {"x": x}
+
+    register_tasks_extension(mcp, backend, task_tools={"process"})
+    return mcp
 
 
-async def _run(coro_with_session):
-    backend = FakeBackend()
-    server = Server("test-tasks")
-    register_tasks_extension(server, backend, task_tools={"process"})
-    async with create_client_server_memory_streams() as (
-        client_streams,
-        server_streams,
-    ):
-        cr, cw = client_streams
-        sr, sw = server_streams
-        init_opts = server.create_initialization_options()
-        async with anyio.create_task_group() as tg:
-
-            async def run_server() -> None:
-                await server.run(sr, sw, init_opts, raise_exceptions=False)
-
-            tg.start_soon(run_server)
-            async with ClientSession(cr, cw) as session:
-                await session.initialize()
-                await coro_with_session(session, backend)
-            tg.cancel_scope.cancel()
+_APPROVAL_SCHEMA = {
+    "type": "object",
+    "properties": {"value": {"type": "string", "enum": ["approve", "reject"]}},
+    "required": ["value"],
+}
+_COST_CENTER_SCHEMA = {
+    "type": "object",
+    "properties": {"cost_center": {"type": "string"}, "memo": {"type": "string"}},
+    "required": ["cost_center"],
+}
 
 
-def test_full_task_lifecycle():
-    async def scenario(session: ClientSession, backend: FakeBackend) -> None:
-        created = await _raw(
-            session, "tools/call", {"name": "process", "arguments": {"x": 1}, **META}
+def test_single_gate_flow():
+    backend = FakeBackend([("approval", "Approve?", _APPROVAL_SCHEMA)])
+    seen_schema: dict[str, Any] = {}
+
+    async def handler(message, response_type, params, context):
+        seen_schema.update(getattr(params, "requestedSchema", None) or {})
+        return ElicitResult(action="accept", content={"value": "approve"})
+
+    async def scenario() -> None:
+        mcp = _build(backend)
+        async with Client(mcp, elicitation_handler=handler) as c:
+            task = await c.call_tool("process", {"x": 1}, task=True)
+            assert task.task_id == "task-1"
+            status = await c.get_task_status(task.task_id)
+            assert status.status == "input_required"
+            result = await c.get_task_result(task.task_id)
+
+        # The server injected routing hints into the pushed elicitation schema.
+        assert seen_schema["x-task-id"] == "task-1"
+        assert seen_schema["x-request-key"] == "approval"
+        # The answer reached the backend under the right key.
+        assert backend.received[0][1]["approval"]["content"] == {"value": "approve"}
+        assert result["content"][0]["text"] == "PAID"
+
+    anyio.run(scenario)
+
+
+def test_two_gate_flow():
+    """A large invoice traverses approval, then a distinct cost-center gate, then completes."""
+    backend = FakeBackend(
+        [
+            ("approval", "Approve?", _APPROVAL_SCHEMA),
+            ("cost-center-coding", "Assign cost center", _COST_CENTER_SCHEMA),
+        ]
+    )
+    seen_keys: list[str] = []
+
+    async def handler(message, response_type, params, context):
+        schema = getattr(params, "requestedSchema", None) or {}
+        key = schema["x-request-key"]
+        seen_keys.append(key)
+        if key == "approval":
+            return ElicitResult(action="accept", content={"value": "approve"})
+        return ElicitResult(
+            action="accept", content={"cost_center": "CC-1000", "memo": "Q3"}
         )
-        assert created["resultType"] == "task"
-        tid = created["taskId"]
-        assert created["status"] == "working"
 
-        g1 = await _raw(session, "tasks/get", {"taskId": tid, **META})
-        assert g1["status"] == "working"
+    async def scenario() -> None:
+        mcp = _build(backend)
+        async with Client(mcp, elicitation_handler=handler) as c:
+            task = await c.call_tool("process", {"x": 1}, task=True)
+            # Gate 1: approval (client cancels tasks/result after the elicitation resolves).
+            await c.get_task_result(task.task_id)
+            # Gate 2: cost-center coding, then terminal.
+            result = await c.get_task_result(task.task_id)
 
-        g2 = await _raw(session, "tasks/get", {"taskId": tid, **META})
-        assert g2["status"] == "input_required"
-        assert g2["inputRequests"]["approval"]["method"] == "elicitation/create"
+        assert seen_keys == ["approval", "cost-center-coding"]
+        assert backend.received[0][1]["approval"]["content"]["value"] == "approve"
+        assert backend.received[1][1]["cost-center-coding"]["content"] == {
+            "cost_center": "CC-1000",
+            "memo": "Q3",
+        }
+        assert result["content"][0]["text"] == "PAID"
 
-        ack = await _raw(
-            session,
-            "tasks/update",
-            {
-                "taskId": tid,
-                "inputResponses": {
-                    "approval": {"action": "accept", "content": {"value": "approve"}}
-                },
-                **META,
-            },
-        )
-        assert ack == {}
-        assert backend.received_inputs[tid]["approval"].content == {"value": "approve"}
-
-        g3 = await _raw(session, "tasks/get", {"taskId": tid, **META})
-        assert g3["status"] == "completed"
-        assert g3["result"]["content"][0]["text"] == "PAID"
-
-    _run_sync(scenario)
+    anyio.run(scenario)
 
 
 def test_cancel_is_cooperative():
-    async def scenario(session: ClientSession, backend: FakeBackend) -> None:
-        created = await _raw(
-            session, "tools/call", {"name": "process", "arguments": {}, **META}
-        )
-        tid = created["taskId"]
-        ack = await _raw(session, "tasks/cancel", {"taskId": tid, **META})
-        assert ack == {}
-        g = await _raw(session, "tasks/get", {"taskId": tid, **META})
-        assert g["status"] == "cancelled"
+    backend = FakeBackend([("approval", "Approve?", _APPROVAL_SCHEMA)])
 
-    _run_sync(scenario)
+    async def scenario() -> None:
+        mcp = _build(backend)
+        async with Client(mcp) as c:
+            task = await c.call_tool("process", {}, task=True)
+            await c.cancel_task(task.task_id)
+            assert backend.cancelled
+            status = await c.get_task_status(task.task_id)
+            assert status.status == "cancelled"
 
-
-def test_task_tool_requires_declared_extension():
-    async def scenario(session: ClientSession, backend: FakeBackend) -> None:
-        # No _meta capability declaration -> server must refuse to create a task.
-        try:
-            await _raw(session, "tools/call", {"name": "process", "arguments": {}})
-            assert False, "expected an error when the extension is not declared"
-        except Exception as e:
-            assert "extension" in str(e).lower()
-
-    _run_sync(scenario)
-
-
-def _run_sync(scenario) -> None:
-    anyio.run(_run, scenario)
+    anyio.run(scenario)
