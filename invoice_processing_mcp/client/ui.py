@@ -1,5 +1,5 @@
-# ABOUTME: Interactive CLI for submitting invoices and answering approval elicitations.
-# Connects to Temporal only; renders the generic inputRequests surfaced by TaskTrackerWorkflow.
+# ABOUTME: Interactive CLI for submitting purchase orders and answering their elicitations.
+# Connects to Temporal only; renders the generic inputRequests surfaced by the child TaskTrackerWorkflow.
 
 from __future__ import annotations
 
@@ -13,25 +13,40 @@ import click
 from temporalio.client import Client as TemporalClient
 from temporalio.service import RPCError
 
+from invoice_processing_mcp.client.purchase_order_workflow import PurchaseOrderWorkflow
 from mcp_tasks_temporal.client import models
 from mcp_tasks_temporal.client.workflows import TaskTrackerWorkflow
 
-INVOICE_TOOL = "process_invoice"
-TASK_TRACKER_PREFIX = "task-tracker-"
+PO_PREFIX = "po-"
+DEFAULT_REQUESTER = "buyer@acme.test"
 
 
-async def _start_task(client: TemporalClient, invoice_json: dict) -> str:
-    """Start a TaskTrackerWorkflow for an invoice and return its workflow ID."""
-    workflow_id = f"{TASK_TRACKER_PREFIX}{uuid.uuid4()}"
+async def _start_po(client: TemporalClient, invoice_json: dict) -> tuple[str, str]:
+    """Start a PurchaseOrderWorkflow for an invoice; return (workflow_id, po_id)."""
+    po_id = f"PO-{uuid.uuid4().hex[:8]}"
+    workflow_id = f"{PO_PREFIX}{uuid.uuid4()}"
+    order = {
+        "po_id": po_id,
+        "requester": DEFAULT_REQUESTER,
+        "invoice": invoice_json,
+    }
     await client.start_workflow(
-        TaskTrackerWorkflow.run,
-        models.TaskTrackerInput(
-            tool_name=INVOICE_TOOL, arguments={"invoice": invoice_json}
-        ),
+        PurchaseOrderWorkflow.run,
+        order,
         id=workflow_id,
         task_queue=models.TASK_QUEUE,
     )
-    return workflow_id
+    return workflow_id, po_id
+
+
+async def _list_pos(client: TemporalClient) -> list[str]:
+    """Running PurchaseOrderWorkflow ids (the user-facing orders)."""
+    pos = []
+    async for execution in client.list_workflows(
+        'WorkflowType = "PurchaseOrderWorkflow" AND ExecutionStatus = "Running"'
+    ):
+        pos.append(execution.id)
+    return pos
 
 
 async def _list_tasks(client: TemporalClient) -> list[dict]:
@@ -58,27 +73,41 @@ async def _find_pending(client: TemporalClient) -> Optional[tuple[str, dict]]:
 
 
 async def _prompt_for(req_params: dict) -> dict:
-    """Prompt for one elicitation's input; return its `content` dict (matching requestedSchema)."""
+    """Prompt for one elicitation's input; return its `content` dict (matching requestedSchema).
+
+    Iterates every property in the schema so arbitrary multi-field forms are captured. Enum fields
+    validate against their choices; other fields accept free text. Optional fields may be skipped
+    by leaving the answer blank.
+    """
     click.echo(f"  {req_params.get('message', 'Input required')}")
     schema = req_params.get("requestedSchema", {})
     properties = schema.get("properties", {})
+    required = set(schema.get("required", []))
 
-    field = None
-    choices = None
+    if not properties:
+        raw = await asyncio.to_thread(input, "  value: ")
+        return {"value": raw.strip()}
+
+    content: dict = {}
     for name, field_schema in properties.items():
-        if field_schema.get("enum"):
-            field, choices = name, [str(v) for v in field_schema["enum"]]
+        choices = (
+            [str(v) for v in field_schema["enum"]] if field_schema.get("enum") else None
+        )
+        is_required = name in required
+        label = f"  {name} [{' / '.join(choices)}]" if choices else f"  {name}"
+        if not is_required:
+            label += " (optional)"
+        while True:
+            raw = await asyncio.to_thread(input, f"{label}: ")
+            value = raw.strip()
+            if not value and not is_required:
+                break  # skip optional field
+            if choices and value not in choices:
+                click.echo(f"  Invalid choice. Options: {' / '.join(choices)}")
+                continue
+            content[name] = value
             break
-    if field is None:
-        field = next(iter(properties), "value")
-
-    label = f"  {field} [{' / '.join(choices)}]" if choices else f"  {field}"
-    while True:
-        raw = await asyncio.to_thread(input, f"{label}: ")
-        value = raw.strip()
-        if not choices or value in choices:
-            return {field: value}
-        click.echo(f"  Invalid choice. Options: {' / '.join(choices)}")
+    return content
 
 
 async def _handle_pending(client: TemporalClient) -> bool:
@@ -131,8 +160,8 @@ async def run_ui(temporal_address: str) -> None:
             try:
                 with open(arg) as f:
                     invoice_json = json.load(f)
-                wf_id = await _start_task(client, invoice_json)
-                click.echo(f"  Started: {wf_id}")
+                wf_id, po_id = await _start_po(client, invoice_json)
+                click.echo(f"  Started purchase order {po_id} ({wf_id})")
             except FileNotFoundError:
                 click.echo(f"  File not found: {arg}")
             except json.JSONDecodeError as e:
@@ -141,12 +170,23 @@ async def run_ui(temporal_address: str) -> None:
                 click.echo(f"  Error: {e}")
 
         elif cmd == "list":
-            tasks = await _list_tasks(client)
-            if not tasks:
-                click.echo("  No running tasks.")
+            pos = await _list_pos(client)
+            if not pos:
+                click.echo("  No running purchase orders.")
             else:
-                for t in tasks:
-                    click.echo(f"  {t['id']}  {t['status']}")
+                for wf_id in pos:
+                    try:
+                        progress = await client.get_workflow_handle(wf_id).query(
+                            PurchaseOrderWorkflow.get_progress
+                        )
+                        steps = ", ".join(progress["steps_done"]) or "(starting)"
+                        click.echo(
+                            f"  {wf_id}\n"
+                            f"    back-office: {steps}\n"
+                            f"    payment: {progress['payment_status']}"
+                        )
+                    except Exception:
+                        click.echo(f"  {wf_id}  (progress unavailable)")
             try:
                 if await _handle_pending(client):
                     click.echo("")

@@ -8,6 +8,14 @@ complete (see [ADR-002](../decisions/002-migrate-to-tasks-extension-v2.md) and
 
 The three items below are the next things to work on, roughly independent.
 
+> **Update (2026-06-27):** Item **#2 is DONE**, and a client-side **`PurchaseOrderWorkflow`** parent
+> orchestrator was added alongside it. The richer server workflow now has a second HITL gate
+> (cost-center coding, key `cost-center-coding`) and a slow `reconcile_with_erp` step; the parent
+> orchestrator runs the `process_invoice` MCP task as a **child `TaskTrackerWorkflow`** while doing
+> back-office work concurrently. See `docs/plans/po-orchestrator-and-multi-gate.md` (the approved
+> plan) and the new files `invoice_processing_mcp/client/purchase_order_workflow.py` +
+> `backoffice_activities.py`. **Item #1 (generic agent) remains open.**
+
 ---
 
 ## 1. Turn the client into a generic chat-loop agent (domain-agnostic)

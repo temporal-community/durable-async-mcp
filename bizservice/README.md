@@ -5,7 +5,7 @@ Temporal workflows, activities, and worker for invoice processing. This is the c
 ## Components
 
 - **`workflows.py`** -- `InvoiceWorkflow` (main orchestrator) and `PayLineItem` (child workflow for each line item)
-- **`activities.py`** -- `validate_against_erp` and `payment_gateway` with configurable failure rates
+- **`activities.py`** -- `validate_against_erp`, `payment_gateway` (configurable failure rates), and `reconcile_with_erp` (a slow ERP-post step)
 - **`worker.py`** -- Temporal worker that polls `invoice-task-queue`
 - **`workflow_cli.py`** -- CLI tool for interacting with workflows directly via Temporal
 
@@ -80,17 +80,25 @@ Use `--address` to connect to a non-default Temporal server (default: `localhost
 ## Workflow Lifecycle
 
 ```
-INITIALIZING -> PENDING-VALIDATION -> PENDING-APPROVAL -> APPROVED -> PAYING -> PAID
-                                                       -> REJECTED
-                                                                      PAYING -> FAILED
+INITIALIZING -> PENDING-VALIDATION -> PENDING-APPROVAL -> APPROVED -> RECONCILING ----------------+
+                                                       -> REJECTED                                |
+                                                                                                  v
+                              (total > $5000)  PENDING-COST-CENTER -> CODED ---> PAYING -> PAID / FAILED
+                              (total <= $5000)  ----------------------------> PAYING -> PAID / FAILED
 ```
 
 ### InvoiceWorkflow
 
-Validates invoice, waits for approval signal (up to 5 days), processes line items in parallel via child workflows.
+Validates invoice, waits for approval (up to 5 days), posts to the ERP via the slow `reconcile_with_erp`
+step, then for invoices over `COST_CENTER_THRESHOLD` ($5000) takes a **second human gate**
+(cost-center coding) before processing line items in parallel via child workflows.
 
-- **Signals:** `ApproveInvoice`, `RejectInvoice`
-- **Queries:** `GetInvoiceStatus`, `GetInvoiceData`
+- **Signals:** `ApproveInvoice`, `RejectInvoice`, `SubmitCostCenter(content)`
+- **Queries:** `GetInvoiceStatus`, `GetInvoiceData`, `GetCostCenter`
+
+> The `workflow_cli` below covers approve/reject only — it has no `SubmitCostCenter` command. To exercise
+> the cost-center gate, drive a large invoice through the MCP client UI, or use a small invoice
+> (≤ $5000, e.g. `samples/invoice1.json`) with the CLI to skip it.
 
 ### PayLineItem
 
@@ -101,4 +109,5 @@ Child workflow that waits until due date, then calls payment gateway with retry 
 ### Activities
 
 - `validate_against_erp` -- 30% random failure, or forced via `FAIL_VALIDATE=true`, disabled via `NO_FAIL_VALIDATE=true`
-- `payment_gateway` -- 10% INSUFFICIENT_FUNDS (non-retryable), 30% retryable failure, or forced via `FAIL_PAYMENT=true`, disabled via `NO_FAIL_PAYMENT=true`
+- `payment_gateway` -- 5% INSUFFICIENT_FUNDS (non-retryable), 30% retryable failure, or forced via `FAIL_PAYMENT=true`, disabled via `NO_FAIL_PAYMENT=true`
+- `reconcile_with_erp` -- posts the approved invoice to the ERP; intentionally slow (delay via `RECONCILE_DELAY_SECONDS`, default 15s) so the MCP client polls several times before the next gate

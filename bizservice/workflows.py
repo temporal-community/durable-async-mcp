@@ -9,7 +9,14 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
-from bizservice.activities import validate_against_erp, payment_gateway
+from bizservice.activities import (
+    payment_gateway,
+    reconcile_with_erp,
+    validate_against_erp,
+)
+
+# Invoices above this total require a second human gate: cost-center coding.
+COST_CENTER_THRESHOLD = 5000
 
 
 def _parse_due_date(due: str) -> datetime:
@@ -62,6 +69,7 @@ class InvoiceWorkflow:
     def __init__(self) -> None:
         self.status: str = "INITIALIZING"
         self.invoice: dict = {}
+        self.cost_center: dict = {}
 
     @workflow.signal
     async def ApproveInvoice(self) -> None:
@@ -71,6 +79,12 @@ class InvoiceWorkflow:
     async def RejectInvoice(self) -> None:
         self.status = "REJECTED"
 
+    @workflow.signal
+    async def SubmitCostCenter(self, content: dict) -> None:
+        """Second-gate data entry: record the cost-center coding and release the gate."""
+        self.cost_center = content
+        self.status = "CODED"
+
     @workflow.query
     def GetInvoiceStatus(self) -> str:
         return self.status
@@ -79,11 +93,17 @@ class InvoiceWorkflow:
     def GetInvoiceData(self) -> dict:
         return self.invoice
 
+    @workflow.query
+    def GetCostCenter(self) -> dict:
+        return self.cost_center
+
     @workflow.run
     async def run(self, invoice: dict) -> str:
         self.invoice = invoice
         self.status = "PENDING-VALIDATION"
-        workflow.logger.info(f"Starting workflow for invoice {invoice.get('invoice_id')}")
+        workflow.logger.info(
+            f"Starting workflow for invoice {invoice.get('invoice_id')}"
+        )
         await workflow.execute_activity(
             validate_against_erp,
             invoice,
@@ -96,7 +116,9 @@ class InvoiceWorkflow:
         )
 
         self.status = "PENDING-APPROVAL"
-        workflow.logger.info(f"Waiting for approval for invoice {invoice.get('invoice_id')}")
+        workflow.logger.info(
+            f"Waiting for approval for invoice {invoice.get('invoice_id')}"
+        )
         # Wait for the approval signal
         await workflow.wait_condition(
             lambda: self.status != "PENDING-APPROVAL",
@@ -107,7 +129,36 @@ class InvoiceWorkflow:
             workflow.logger.info("REJECTED")
             return "REJECTED"
 
-        workflow.logger.info(f"Invoice {invoice.get('invoice_id')} approved, processing line items")
+        # Post the approved invoice to the ERP — a slow step the client polls through.
+        self.status = "RECONCILING"
+        workflow.logger.info(
+            f"Reconciling invoice {invoice.get('invoice_id')} with ERP"
+        )
+        await workflow.execute_activity(
+            reconcile_with_erp,
+            invoice,
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+        # Large invoices need a second human gate: cost-center coding (data entry).
+        total = sum(line.get("amount", 0) for line in invoice.get("lines", []))
+        if total > COST_CENTER_THRESHOLD:
+            self.status = "PENDING-COST-CENTER"
+            workflow.logger.info(
+                f"Invoice {invoice.get('invoice_id')} (${total}) needs cost-center coding"
+            )
+            await workflow.wait_condition(
+                lambda: self.status != "PENDING-COST-CENTER",
+                timeout=timedelta(days=3),
+            )
+            if self.status == "REJECTED":
+                workflow.logger.info("REJECTED")
+                return "REJECTED"
+
+        workflow.logger.info(
+            f"Invoice {invoice.get('invoice_id')} approved, processing line items"
+        )
 
         # Start all child workflows in parallel
         handles = []

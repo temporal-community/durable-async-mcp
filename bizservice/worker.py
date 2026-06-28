@@ -1,5 +1,6 @@
 import asyncio
 import os
+
 import click
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -24,7 +25,11 @@ async def run_worker(task_queue: str) -> None:
         client,
         task_queue=task_queue,
         workflows=[InvoiceWorkflow, PayLineItem],
-        activities=[activities.validate_against_erp, activities.payment_gateway],
+        activities=[
+            activities.validate_against_erp,
+            activities.payment_gateway,
+            activities.reconcile_with_erp,
+        ],
     )
     await worker.run()
 

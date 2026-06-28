@@ -18,6 +18,7 @@ from mcp_tasks_temporal.wire import InputRequest, InputResponse
 INVOICE_TOOL = "process_invoice"
 INVOICE_TASK_QUEUE = "invoice-task-queue"
 APPROVAL_KEY = "approval"
+COST_CENTER_KEY = "cost-center-coding"
 
 # The workflow-state -> task-state map: InvoiceWorkflow's domain status -> MCP task status.
 # This dict (plus the per-status payload built in get_state) is the developer's mapping job.
@@ -26,6 +27,9 @@ TEMPORAL_TO_MCP_STATE: dict[str, str] = {
     "PENDING-VALIDATION": "working",
     "PENDING-APPROVAL": "input_required",
     "APPROVED": "working",
+    "RECONCILING": "working",
+    "PENDING-COST-CENTER": "input_required",
+    "CODED": "working",
     "PAYING": "working",
     "PAID": "completed",
     "FAILED": "failed",
@@ -64,6 +68,35 @@ def _approval_request(invoice: dict[str, Any]) -> InputRequest:
     )
 
 
+def _cost_center_request(invoice: dict[str, Any]) -> InputRequest:
+    invoice_id = invoice.get("invoice_id", "unknown")
+    total = sum(line.get("amount", 0) for line in invoice.get("lines", []))
+    return InputRequest(
+        method="elicitation/create",
+        params={
+            "mode": "form",
+            "message": (
+                f"Invoice {invoice_id} (${total:.2f}) exceeds the auto-approval limit. "
+                f"Assign a cost center to release payment:"
+            ),
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "cost_center": {
+                        "type": "string",
+                        "description": "GL cost-center code (e.g. CC-1000)",
+                    },
+                    "memo": {
+                        "type": "string",
+                        "description": "Optional note for the audit trail",
+                    },
+                },
+                "required": ["cost_center"],
+            },
+        },
+    )
+
+
 def _terminal_result(invoice_status: str) -> dict[str, Any]:
     return {
         "content": [
@@ -74,21 +107,28 @@ def _terminal_result(invoice_status: str) -> dict[str, Any]:
     }
 
 
-def _decision_is_approve(response: Any) -> bool:
-    """Interpret an InputResponse (or its dict form) as approve/reject."""
-    action = (
+def _response_action(response: Any) -> str | None:
+    return (
         getattr(response, "action", None)
         if not isinstance(response, dict)
         else response.get("action")
     )
+
+
+def _response_content(response: Any) -> dict[str, Any]:
     content = (
         getattr(response, "content", None)
         if not isinstance(response, dict)
         else response.get("content")
     )
-    if action in ("decline", "cancel"):
+    return content or {}
+
+
+def _decision_is_approve(response: Any) -> bool:
+    """Interpret an InputResponse (or its dict form) as approve/reject."""
+    if _response_action(response) in ("decline", "cancel"):
         return False
-    value = (content or {}).get("value", "reject")
+    value = _response_content(response).get("value", "reject")
     return str(value).lower() == "approve"
 
 
@@ -149,7 +189,10 @@ class InvoiceTaskBackend:
 
         if mcp_state == "input_required":
             invoice = await handle.query(InvoiceWorkflow.GetInvoiceData)
-            state.input_requests = {APPROVAL_KEY: _approval_request(invoice)}
+            if invoice_status == "PENDING-COST-CENTER":
+                state.input_requests = {COST_CENTER_KEY: _cost_center_request(invoice)}
+            else:
+                state.input_requests = {APPROVAL_KEY: _approval_request(invoice)}
         elif invoice_status in ("PAID", "REJECTED"):
             state.result = _terminal_result(invoice_status)
         elif invoice_status == "FAILED":
@@ -163,6 +206,18 @@ class InvoiceTaskBackend:
         self, task_id: str, input_responses: dict[str, InputResponse]
     ) -> None:
         handle = self._client.get_workflow_handle(task_id)
+
+        # Second gate: cost-center coding. Decline/cancel rejects; otherwise record the coding.
+        if COST_CENTER_KEY in input_responses:
+            cc_response = input_responses[COST_CENTER_KEY]
+            if _response_action(cc_response) in ("decline", "cancel"):
+                await handle.signal(InvoiceWorkflow.RejectInvoice)
+            else:
+                await handle.signal(
+                    InvoiceWorkflow.SubmitCostCenter, _response_content(cc_response)
+                )
+            return
+
         response = input_responses.get(APPROVAL_KEY)
         if _decision_is_approve(response):
             await handle.signal(InvoiceWorkflow.ApproveInvoice)

@@ -15,6 +15,8 @@ from temporalio.worker.workflow_sandbox import (
     SandboxRestrictions,
 )
 
+from invoice_processing_mcp.client import backoffice_activities
+from invoice_processing_mcp.client.purchase_order_workflow import PurchaseOrderWorkflow
 from mcp_tasks_temporal.client import models
 from mcp_tasks_temporal.plugin import MCPTasksClientPlugin
 
@@ -41,6 +43,15 @@ async def run_worker(config_path: str, temporal_address: str) -> None:
     worker = Worker(
         client,
         task_queue=models.TASK_QUEUE,
+        # PurchaseOrderWorkflow + back-office activities are MERGED with the plugin's
+        # TaskTrackerWorkflow + MCP activities (do NOT re-list TaskTrackerWorkflow here).
+        workflows=[PurchaseOrderWorkflow],
+        activities=[
+            backoffice_activities.record_goods_receipt,
+            backoffice_activities.update_inventory,
+            backoffice_activities.notify_requester,
+            backoffice_activities.close_po,
+        ],
         plugins=[MCPTasksClientPlugin(server_params)],
         workflow_runner=SandboxedWorkflowRunner(restrictions=_SANDBOX_RESTRICTIONS),
     )

@@ -28,6 +28,7 @@ class FakeHandle:
         self.statuses = list(statuses)
         self.invoice = invoice
         self.signals: list[str] = []
+        self.signal_args: list[Any] = []
         self.cancelled = False
         self.start_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -40,8 +41,10 @@ class FakeHandle:
             return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
         return self.invoice
 
-    async def signal(self, s: Any) -> None:
+    async def signal(self, s: Any, *args: Any) -> None:
         self.signals.append(getattr(s, "__name__", str(s)))
+        if args:
+            self.signal_args.append(args[0])
 
     async def cancel(self) -> None:
         self.cancelled = True
@@ -88,6 +91,45 @@ def test_get_state_pending_approval_builds_elicitation():
         "reject",
     ]
     assert state.result is None
+
+
+def test_get_state_pending_cost_center_builds_distinct_request():
+    state = anyio.run(_backend(["PENDING-COST-CENTER"]).get_state, "invoice-x")
+    assert state.status == "input_required"
+    # Distinct key from the approval gate, satisfying per-task key uniqueness.
+    assert "approval" not in state.input_requests
+    req = state.input_requests["cost-center-coding"]
+    assert req.method == "elicitation/create"
+    props = req.params["requestedSchema"]["properties"]
+    assert "cost_center" in props and "memo" in props
+    assert req.params["requestedSchema"]["required"] == ["cost_center"]
+
+
+def test_submit_input_cost_center_signals_submit_with_content():
+    handle = FakeHandle(["PENDING-COST-CENTER"], INVOICE)
+    backend = InvoiceTaskBackend(FakeClient(handle))
+    anyio.run(
+        backend.submit_input,
+        "invoice-x",
+        {
+            "cost-center-coding": InputResponse(
+                action="accept", content={"cost_center": "CC-1000", "memo": "Q3"}
+            )
+        },
+    )
+    assert "SubmitCostCenter" in handle.signals
+    assert handle.signal_args[0] == {"cost_center": "CC-1000", "memo": "Q3"}
+
+
+def test_submit_input_cost_center_decline_signals_reject():
+    handle = FakeHandle(["PENDING-COST-CENTER"], INVOICE)
+    backend = InvoiceTaskBackend(FakeClient(handle))
+    anyio.run(
+        backend.submit_input,
+        "invoice-x",
+        {"cost-center-coding": InputResponse(action="decline", content=None)},
+    )
+    assert "RejectInvoice" in handle.signals
 
 
 def test_get_state_paid_builds_result():
@@ -197,3 +239,85 @@ async def _server_scenario():
 
 def test_server_wiring_full_flow():
     anyio.run(_server_scenario)
+
+
+async def _two_gate_scenario():
+    # A large invoice traverses both gates: approval -> cost-center coding -> paid.
+    handle = FakeHandle(["PENDING-APPROVAL", "PENDING-COST-CENTER", "PAID"], INVOICE)
+    client = FakeClient(handle)
+    server = build_server(client)
+    async with create_client_server_memory_streams() as (
+        client_streams,
+        server_streams,
+    ):
+        cr, cw = client_streams
+        sr, sw = server_streams
+        init = server.create_initialization_options()
+        async with anyio.create_task_group() as tg:
+
+            async def run_server():
+                await server.run(sr, sw, init, raise_exceptions=False)
+
+            tg.start_soon(run_server)
+            async with ClientSession(cr, cw) as session:
+                await session.initialize()
+
+                created = await _raw(
+                    session,
+                    "tools/call",
+                    {
+                        "name": "process_invoice",
+                        "arguments": {"invoice": INVOICE},
+                        **META,
+                    },
+                )
+                tid = created["taskId"]
+
+                # Gate 1: approval.
+                g1 = await _raw(session, "tasks/get", {"taskId": tid, **META})
+                assert g1["status"] == "input_required"
+                assert "approval" in g1["inputRequests"]
+                await _raw(
+                    session,
+                    "tasks/update",
+                    {
+                        "taskId": tid,
+                        "inputResponses": {
+                            "approval": {
+                                "action": "accept",
+                                "content": {"value": "approve"},
+                            }
+                        },
+                        **META,
+                    },
+                )
+                assert "ApproveInvoice" in handle.signals
+
+                # Gate 2: cost-center coding (distinct key, multi-field form).
+                g2 = await _raw(session, "tasks/get", {"taskId": tid, **META})
+                assert g2["status"] == "input_required"
+                assert "cost-center-coding" in g2["inputRequests"]
+                await _raw(
+                    session,
+                    "tasks/update",
+                    {
+                        "taskId": tid,
+                        "inputResponses": {
+                            "cost-center-coding": {
+                                "action": "accept",
+                                "content": {"cost_center": "CC-1000", "memo": "Q3"},
+                            }
+                        },
+                        **META,
+                    },
+                )
+                assert "SubmitCostCenter" in handle.signals
+
+                g3 = await _raw(session, "tasks/get", {"taskId": tid, **META})
+                assert g3["status"] == "completed"
+                assert "PAID" in g3["result"]["content"][0]["text"]
+            tg.cancel_scope.cancel()
+
+
+def test_server_wiring_two_gate_flow():
+    anyio.run(_two_gate_scenario)

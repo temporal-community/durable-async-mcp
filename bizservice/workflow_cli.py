@@ -70,7 +70,9 @@ async def force_pay(client: Client, args: argparse.Namespace) -> None:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Interact with InvoiceWorkflow via Temporal")
+    parser = argparse.ArgumentParser(
+        description="Interact with InvoiceWorkflow via Temporal"
+    )
     parser.add_argument(
         "--address", default=DEFAULT_TEMPORAL_ADDRESS, help="Temporal server address"
     )
@@ -78,7 +80,9 @@ async def main() -> None:
 
     # start
     sp_start = subparsers.add_parser("start", help="Start a new invoice workflow")
-    sp_start.add_argument("--invoice", help="Invoice JSON string (default: samples/invoice_acme.json)")
+    sp_start.add_argument(
+        "--invoice", help="Invoice JSON string (default: samples/invoice_acme.json)"
+    )
     sp_start.add_argument("--id", help="Workflow ID (default: auto-generated)")
 
     # approve
@@ -98,8 +102,12 @@ async def main() -> None:
     sp_data.add_argument("workflow_id", help="Workflow ID to query")
 
     # force-pay
-    sp_force_pay = subparsers.add_parser("force-pay", help="Force immediate payment on a PayLineItem child workflow")
-    sp_force_pay.add_argument("workflow_id", help="Child workflow ID to force payment on")
+    sp_force_pay = subparsers.add_parser(
+        "force-pay", help="Force immediate payment on a PayLineItem child workflow"
+    )
+    sp_force_pay.add_argument(
+        "workflow_id", help="Child workflow ID to force payment on"
+    )
 
     args = parser.parse_args()
     client = await Client.connect(args.address)
