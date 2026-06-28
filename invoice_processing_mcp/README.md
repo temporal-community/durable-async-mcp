@@ -19,13 +19,16 @@ Two components:
   - `backoffice_activities.py` — the `mcp`-free side-work activities (goods receipt, inventory,
     notify requester, close PO) the parent runs alongside payment.
   - `ui.py` — an interactive CLI that talks to Temporal only.
+  - `gui.py` — a NiceGUI browser status board (also Temporal-only): a live list of all purchase
+    orders with each invoice task's lifecycle state, with inline answering of pending HITL questions.
 
 The durable `TaskTrackerWorkflow` and the MCP wire activities live in `mcp_tasks_temporal`, not here.
 
 ## Processes
 
-For a normal run you start **three** processes (plus the Temporal server). The MCP server is *not*
-run separately — the client worker launches it over stdio (per `client_config.json`).
+For a normal run you start **three** processes (plus the Temporal server), with an **optional** fourth
+for the GUI. The MCP server is *not* run separately — the client worker launches it over stdio (per
+`client_config.json`).
 
 | Process | Command | What it does |
 |---|---|---|
@@ -33,8 +36,30 @@ run separately — the client worker launches it over stdio (per `client_config.
 | bizservice worker | `python -m bizservice.worker` | Runs `InvoiceWorkflow` + `PayLineItem` on `invoice-task-queue` |
 | client worker | `python -m invoice_processing_mcp.client.worker` | Temporal worker on `mcp-tasks-client`; adopts `MCPTasksClientPlugin`, which spawns the MCP server over stdio and owns the session |
 | UI | `python -m invoice_processing_mcp.client.ui` | Interactive CLI; connects to Temporal only |
+| GUI (optional) | `python -m invoice_processing_mcp.client.gui` | NiceGUI status board at `http://localhost:8080`; connects to Temporal only. An alternative to the CLI for watching/answering tasks |
 
 > Run the MCP server standalone only for debugging: `python -m invoice_processing_mcp.server`.
+
+### GUI status board
+
+`python -m invoice_processing_mcp.client.gui` (flags: `--temporal-address`, `--port`,
+`--refresh-seconds`, default 2s ≈ the task poll interval) opens a browser page that:
+
+- lists **every** `PurchaseOrderWorkflow` (running and completed), newest first, each showing the
+  **invoice task's** lifecycle state (`working` / `input_required` / `completed` / `failed`);
+- refreshes automatically about every 2 seconds;
+- makes an `input_required` status **clickable** — clicking renders that task's pending question in a
+  pane above the list (a form built from the elicitation's `requestedSchema`); **Submit** signals the
+  child task's `user_decision` (to reject, choose `reject` in the form), and **Close** dismisses the
+  pane without answering (the task stays `input_required`). Clicking a different `input_required` row
+  swaps the pane;
+- has a submit pane below the list with **Submit simple** / **Submit large** buttons that start a
+  purchase order from `samples/invoice1.json` / `samples/invoice_large.json`, randomizing the
+  `invoice_id` (`INV-####`) and perturbing line amounts ±10% each time (so every submission is distinct
+  while still hitting the same gates).
+
+The GUI needs the **client worker** running — it queries/signals/starts workflows, but the worker
+executes the tasks. (You can still submit from the CLI `ui.py` too.)
 
 ## Running the demo
 

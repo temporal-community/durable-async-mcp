@@ -36,6 +36,7 @@ invoice_processing_mcp/  Invoice app (consumer of mcp_tasks_temporal) — two co
     purchase_order_workflow.py  PurchaseOrderWorkflow — parent orchestrator; runs the MCP task as a child TaskTrackerWorkflow while doing back-office work concurrently
     backoffice_activities.py    mcp-free activities (goods receipt, inventory, notify, close PO) the parent runs alongside payment
     ui.py                Interactive CLI (Temporal only); submits purchase orders, renders inputRequests
+    gui.py               NiceGUI status board (Temporal only); lists POs + live invoice-task state, answers HITL inline. `python -m invoice_processing_mcp.client.gui`
     __main__.py          `python -m invoice_processing_mcp.client` (defaults to UI)
   client_config.json     MCP client config (Claude Desktop format)
   boot-demo.sh           tmux helper to start server + worker
@@ -82,6 +83,9 @@ python -m invoice_processing_mcp.client.ui
 # or: python -m invoice_processing_mcp.client  (defaults to UI)
 #   submit samples/invoice_large.json   → $12.5k, exercises BOTH HITL gates
 #   submit samples/invoice1.json        → $1000, approval gate only
+
+# Optional: NiceGUI status board (connects to Temporal only) at http://localhost:8080
+python -m invoice_processing_mcp.client.gui [--port 8080 --refresh-seconds 2.0]
 
 # Or use the helper script (requires tmux)
 ./invoice_processing_mcp/boot-demo.sh
@@ -205,9 +209,10 @@ A reusable, Temporal-backed implementation of the MCP **Tasks extension** (`io.m
 The invoice consumer of the durable client; the reusable parts live in `mcp_tasks_temporal`.
 
 - **`worker.py`** — reads the Claude Desktop-format config, builds `StdioServerParameters`, and runs `Worker(client, task_queue=models.TASK_QUEUE, workflows=[PurchaseOrderWorkflow], activities=[<back-office>], plugins=[MCPTasksClientPlugin(server_params)])`. The plugin's `TaskTrackerWorkflow` + wire activities are **merged** with these explicit lists (do **not** re-list `TaskTrackerWorkflow`).
-- **`purchase_order_workflow.py`** — `PurchaseOrderWorkflow`, the parent orchestrator: records goods receipt, starts `process_invoice` as a **child `TaskTrackerWorkflow`** (`workflow.start_child_workflow`, child id `task-tracker-{workflow.uuid4()}`), then `asyncio.gather`s the child handle with the back-office work so they run **concurrently**. Query `get_progress`. The MCP task is one step of a larger durable business process, not the whole thing.
+- **`purchase_order_workflow.py`** — `PurchaseOrderWorkflow`, the parent orchestrator: records goods receipt, starts `process_invoice` as a **child `TaskTrackerWorkflow`** (`workflow.start_child_workflow`, child id `task-tracker-{workflow.uuid4()}`), then `asyncio.gather`s the child handle with the back-office work so they run **concurrently**. Query `get_progress` returns `{po_id, steps_done, payment_status, payment_workflow_id}` (the child task id). The MCP task is one step of a larger durable business process, not the whole thing.
 - **`backoffice_activities.py`** — `mcp`-free activities (`record_goods_receipt`, `update_inventory`, `notify_requester`, `close_po`) the parent runs alongside payment; per-step delay via `BACKOFFICE_DELAY_SECONDS` (default 2s). Kept `mcp`-free so the sandbox re-import of the parent stays clean; referenced by function object.
-- **`ui.py`** — Temporal-only CLI. `submit <file>` starts a `PurchaseOrderWorkflow`; `list` shows running POs with `get_progress` and renders any pending `inputRequests` from the child trackers (still discovered by `WorkflowType = "TaskTrackerWorkflow"`), then signals `user_decision`. `_prompt_for` renders arbitrary multi-field schemas (optional fields skippable, enums validated) — the seed for item #1's generic renderer.
+- **`ui.py`** — Temporal-only CLI. `submit <file>` starts a `PurchaseOrderWorkflow`; `list` shows running POs with `get_progress` and renders any pending `inputRequests` from the child trackers (still discovered by `WorkflowType = "TaskTrackerWorkflow"`), then signals `user_decision`. `_prompt_for` renders arbitrary multi-field schemas (optional fields skippable, enums validated).
+- **`gui.py`** — Temporal-only NiceGUI status board. Lists **all** `PurchaseOrderWorkflow`s (running + closed, newest first) via `list_workflows`; per PO, resolves the child task id from `get_progress` and shows the child's live `get_status`; auto-refreshes every `--refresh-seconds` (default 2s ≈ the server poll interval). Clicking an `input_required` status renders that task's pending question (from the child's `get_pending_input`) in a pane above the list; **Submit** signals `user_decision` (reject by choosing `reject` in the form), **Close** dismisses without answering. A submit pane (**Submit simple/large**) starts a PO from a sample with a randomized `invoice_id` + ±10% line amounts. Temporal-facing helpers (`fetch_po_rows`, `build_responses`, `submit_decision`, `randomize_invoice`, `start_po`) are factored out and unit-tested (`tests/test_gui.py`); rendering is verified manually.
 
 **No elicitation callback, no concurrency hack.** Because v2 surfaces input as data in `tasks/get` and answers it via `tasks/update`, the old `_elicitation_handler`, `_active_elicitations`, `x-task-id` smuggling, and 20ms-raise workaround are all gone. HITL is just "store `inputRequests` → await a signal → `tasks/update`" inside the workflow.
 
@@ -225,4 +230,4 @@ The old LLM-driven CLI (formerly `async_mcp/mcp_client/`, OpenAI Responses API +
 - Invoice JSON: `{"invoice_id": str, "customer": str, "lines": [{"description": str, "amount": number, "due_date": ISO8601}]}`
 - Temporal address via `TEMPORAL_ADDRESS` (default `localhost:7233`); client config uses Claude Desktop format `{"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}`.
 - **Testing**: extension + server tested end-to-end over the in-memory MCP transport (`mcp.shared.memory.create_client_server_memory_streams`), including a two-gate flow; `TaskTrackerWorkflow` and `PurchaseOrderWorkflow` under `WorkflowEnvironment.start_time_skipping()` (the PO test asserts back-office work completes *while* payment is pending, then drives the child). The time-skipping test server has **no visibility API** — `list_workflows` is unimplemented — so the PO test reads the child id from the parent's `get_progress` rather than querying by type. The real-workflow E2E is the manual demo — `InvoiceWorkflow`'s 5-day approval timer makes the time-skipping env auto-approve, so it isn't in the suite.
-- `mcp==2.0.0a2` is pinned (unpinned resolves to v1); `temporalio>=1.19` for the Plugins API.
+- `mcp==2.0.0a2` is pinned (unpinned resolves to v1); `temporalio>=1.19` for the Plugins API; `nicegui` for the GUI status board.

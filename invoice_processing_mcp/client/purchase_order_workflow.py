@@ -32,12 +32,14 @@ class PurchaseOrderWorkflow:
     steps are complete."""
 
     def __init__(self) -> None:
+        self._po_id: str | None = None
         self._steps_done: list[str] = []
         self._payment_status: str = "working"
         self._payment_workflow_id: str | None = None
 
     @workflow.run
     async def run(self, order: dict) -> dict[str, Any]:
+        self._po_id = order.get("po_id")
         # 1. Goods receipt kicks off fulfillment before we involve payment.
         await workflow.execute_activity(
             record_goods_receipt, order, start_to_close_timeout=_ACTIVITY_TIMEOUT
@@ -79,6 +81,7 @@ class PurchaseOrderWorkflow:
     def get_progress(self) -> dict[str, Any]:
         """Back-office steps completed so far + last-known payment status (for the UI)."""
         return {
+            "po_id": self._po_id,
             "steps_done": self._steps_done,
             "payment_status": self._payment_status,
             "payment_workflow_id": self._payment_workflow_id,
