@@ -202,7 +202,7 @@ async def _submit_sample(path: str) -> None:
     except Exception as exc:
         ui.notify(f"Submit failed: {exc}", type="negative")
         return
-    ui.notify(f"Submitted {invoice['invoice_id']}")
+    ui.notify(f"Submitted purchase order for invoice {invoice['invoice_id']}")
     await _refresh_all()
 
 
@@ -354,7 +354,7 @@ def main(temporal_address: str, port: int, refresh_seconds: float) -> None:
     global _temporal_address, _refresh_seconds
     _temporal_address = temporal_address
     _refresh_seconds = refresh_seconds
-    ui.run(port=port, reload=False, title="Invoice Tasks", show=False)
+    ui.run(port=port, reload=False, title="Purchase Orders", show=False)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

@@ -117,7 +117,7 @@ async def _handle_pending(client: TemporalClient) -> bool:
         return False
 
     wf_id, input_requests = found
-    click.echo(f"\nInput needed for task {wf_id}:")
+    click.echo(f"\nApproval needed on a purchase order (task {wf_id}):")
     responses: dict[str, dict] = {}
     for key, request in input_requests.items():
         try:
@@ -135,8 +135,11 @@ async def _handle_pending(client: TemporalClient) -> bool:
 
 async def run_ui(temporal_address: str) -> None:
     client = await TemporalClient.connect(temporal_address)
-    click.echo("Invoice Processing Client")
-    click.echo("Commands: submit <file>, list, quit\n")
+    click.echo("Purchase Order Client")
+    click.echo("Commands: submit <file>, list, quit")
+    click.echo(
+        "  submit <file> — raise a purchase order from a supplier invoice JSON\n"
+    )
 
     while True:
         try:
@@ -155,7 +158,9 @@ async def run_ui(temporal_address: str) -> None:
 
         elif cmd == "submit":
             if not arg:
-                click.echo("  Usage: submit <invoice_file.json>")
+                click.echo(
+                    "  Usage: submit <file.json>  (e.g. samples/invoice_large.json)"
+                )
                 continue
             try:
                 with open(arg) as f:
@@ -207,7 +212,7 @@ async def run_ui(temporal_address: str) -> None:
     help="Temporal server address",
 )
 def main(temporal_address: str) -> None:
-    """Start the invoice processing UI."""
+    """Start the purchase order client UI."""
     try:
         asyncio.run(run_ui(temporal_address))
     except KeyboardInterrupt:
