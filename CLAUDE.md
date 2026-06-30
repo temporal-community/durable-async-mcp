@@ -39,7 +39,7 @@ invoice_processing_mcp/  Invoice app (consumer of mcp_tasks_temporal) — two co
     gui.py               NiceGUI status board (Temporal only); lists POs + live invoice-task state, answers HITL inline. `python -m invoice_processing_mcp.client.gui`
     __main__.py          `python -m invoice_processing_mcp.client` (defaults to UI)
   client_config.json     MCP client config (Claude Desktop format)
-  boot-demo.sh           tmux helper to start server + worker
+  boot-demo.sh           tmux helper that boots the whole demo (Temporal + bizservice worker + client worker + UI)
   tests/                 test_invoice_backend.py (backend mapping + 2-gate server wiring); test_purchase_order_workflow.py; test_ui_prompt.py
 durable_sync_mcp/        Synchronous-tools server using SDK-vendored mcp.server.fastmcp (removed in v2; NOT migrated — see note)
   server.py              FastMCP server with individual tools for Claude Desktop
@@ -87,7 +87,7 @@ python -m invoice_processing_mcp.client.ui
 # Optional: NiceGUI status board (connects to Temporal only) at http://localhost:8080
 python -m invoice_processing_mcp.client.gui [--port 8080 --refresh-seconds 2.0]
 
-# Or use the helper script (requires tmux)
+# Or boot the whole demo in one tmux session (requires tmux) — replaces Terminals 1–5 above:
 ./invoice_processing_mcp/boot-demo.sh
 ```
 

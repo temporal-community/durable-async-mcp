@@ -37,6 +37,15 @@ source .venv/bin/activate
 uv pip install -e ".[dev]"   # installs mcp==2.0.0a2 (pinned)
 ```
 
+> **Switching branches?** `main` (the MCP Tasks *extension* / v2 build) and the v1 branch (FastMCP +
+> server-push elicitation) pin **different, incompatible MCP stacks** — `main` uses `mcp==2.0.0a2`,
+> the v1 branch uses `fastmcp`. After every `git checkout` between them, re-sync the virtualenv or
+> imports will fail:
+>
+> ```bash
+> uv pip install -e ".[dev]"
+> ```
+
 Each subdirectory has its own README with detailed instructions for running that demo.
 
 ## Repository Structure
