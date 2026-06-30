@@ -64,12 +64,24 @@ executes the tasks. (You can still submit from the CLI `ui.py` too.)
 
 ## Running the demo
 
+**One command (requires tmux)** — boots all four processes in a single tmux session and lands you on
+the UI pane:
+
+```bash
+./invoice_processing_mcp/boot-demo.sh
+```
+
+**Or start them by hand**, one per terminal (with the venv active):
+
 ```bash
 temporal server start-dev                                   # terminal 1
 python -m bizservice.worker                                 # terminal 2
-python -m invoice_processing_mcp.client.worker             # terminal 3
-python -m invoice_processing_mcp.client.ui                 # terminal 4  (or: python -m invoice_processing_mcp.client)
+python -m invoice_processing_mcp.client.worker              # terminal 3 (auto-launches the MCP server over stdio)
+python -m invoice_processing_mcp.client.ui                  # terminal 4 (or: python -m invoice_processing_mcp.client)
 ```
+
+Then in the UI: `submit samples/invoice_large.json` (both HITL gates) or `samples/invoice1.json`
+(approval gate only). The optional NiceGUI board is `python -m invoice_processing_mcp.client.gui`.
 
 ### Starting a client-side workflow
 
