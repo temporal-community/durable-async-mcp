@@ -94,7 +94,7 @@ warn_unreachable = true
 strict_equality = true
 
 [tool.pytest.ini_options]
-testpaths = ["mcp_tasks_temporal/tests", "invoice_processing_mcp/tests"]
+testpaths = ["mcp_tasks_temporal/tests", "invoice_processing_mcp/tests", "bizservice/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

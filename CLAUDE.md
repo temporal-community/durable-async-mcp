@@ -17,7 +17,7 @@ The client side is `invoice_processing_mcp/client/` — a durable Temporal-based
 ## Repository Structure
 
 ```
-bizservice/              Temporal workflows, activities, worker, CLI (pure Temporal; unchanged)
+bizservice/              Temporal workflows, activities, worker, CLI (pure Temporal); tests/ covers the approval gate (auto-approve vs. HITL)
 mcp_tasks_temporal/      Reusable Temporal-backed MCP Tasks extension (io.modelcontextprotocol/tasks)
   wire.py                Pydantic wire types for the extension
   _sdk_compat.py         Alpha shim: lets a bare CreateTaskResult pass tools/call validation
@@ -45,7 +45,7 @@ durable_sync_mcp/        Synchronous-tools server using SDK-vendored mcp.server.
   server.py              FastMCP server with individual tools for Claude Desktop
   claude_desktop_config.json  Sample Claude Desktop config
   README.md              Setup and usage instructions
-samples/                 Sample invoice JSON (invoice1.json: $1000 → one gate; invoice_large.json: $12.5k → both gates)
+samples/                 Sample invoice JSON (invoice_small.json: $250 → no gates, auto-approved; invoice1.json: $1000 → one gate; invoice_large.json: $12.5k → both gates)
 docs/                    Design docs, research, and plans
 ```
 
@@ -83,6 +83,7 @@ python -m invoice_processing_mcp.client.ui
 # or: python -m invoice_processing_mcp.client  (defaults to UI)
 #   submit samples/invoice_large.json   → $12.5k, exercises BOTH HITL gates
 #   submit samples/invoice1.json        → $1000, approval gate only
+#   submit samples/invoice_small.json   → $250, auto-approved (no HITL)
 
 # Optional: NiceGUI status board (connects to Temporal only) at http://localhost:8080
 python -m invoice_processing_mcp.client.gui [--port 8080 --refresh-seconds 2.0]
@@ -93,7 +94,7 @@ python -m invoice_processing_mcp.client.gui [--port 8080 --refresh-seconds 2.0]
 
 ### Running Tests
 ```bash
-uv run pytest                                            # all (testpaths: mcp_tasks_temporal/tests, invoice_processing_mcp/tests)
+uv run pytest                                            # all (testpaths: mcp_tasks_temporal/tests, invoice_processing_mcp/tests, bizservice/tests)
 uv run pytest mcp_tasks_temporal/tests/test_server.py -q # one file
 uv run pytest path/to/test.py::test_name                 # single test
 ```
@@ -109,7 +110,7 @@ mypy .
 ## Architecture
 
 ### Workflows (`bizservice/workflows.py`)
-- **InvoiceWorkflow** — Main orchestrator. Validates invoice, waits for approval (up to 5 days), reconciles with the ERP (slow step), then for invoices over `COST_CENTER_THRESHOLD` ($5000) takes a **second HITL gate** (cost-center coding) before paying line items in parallel via child workflows. Status: INITIALIZING -> PENDING-VALIDATION -> PENDING-APPROVAL -> APPROVED -> RECONCILING -> [PENDING-COST-CENTER -> CODED] -> PAYING -> PAID/FAILED (or REJECTED). Signals: `ApproveInvoice`, `RejectInvoice`, `SubmitCostCenter(content)`. Queries: `GetInvoiceStatus`, `GetInvoiceData`, `GetCostCenter`.
+- **InvoiceWorkflow** — Main orchestrator. Validates invoice; invoices at or below `AUTO_APPROVE_THRESHOLD` ($500) are approved automatically (no HITL), others wait for approval (up to 5 days); then reconciles with the ERP (slow step), then for invoices over `COST_CENTER_THRESHOLD` ($5000) takes a **second HITL gate** (cost-center coding) before paying line items in parallel via child workflows. Status: INITIALIZING -> PENDING-VALIDATION -> [PENDING-APPROVAL] -> APPROVED -> RECONCILING -> [PENDING-COST-CENTER -> CODED] -> PAYING -> PAID/FAILED (or REJECTED). Signals: `ApproveInvoice`, `RejectInvoice`, `SubmitCostCenter(content)`. Queries: `GetInvoiceStatus`, `GetInvoiceData`, `GetCostCenter`.
 - **PayLineItem** — Child workflow that waits until due date, then calls payment gateway with retry policy (3 attempts, non-retryable for INSUFFICIENT_FUNDS). Signal: `ForcePayment` skips the due-date timer and pays immediately.
 
 ### Activities (`bizservice/activities.py`)
@@ -212,7 +213,7 @@ The invoice consumer of the durable client; the reusable parts live in `mcp_task
 - **`purchase_order_workflow.py`** — `PurchaseOrderWorkflow`, the parent orchestrator: records goods receipt, starts `process_invoice` as a **child `TaskTrackerWorkflow`** (`workflow.start_child_workflow`, child id `task-tracker-{workflow.uuid4()}`), then `asyncio.gather`s the child handle with the back-office work so they run **concurrently**. Query `get_progress` returns `{po_id, steps_done, payment_status, payment_workflow_id}` (the child task id). The MCP task is one step of a larger durable business process, not the whole thing.
 - **`backoffice_activities.py`** — `mcp`-free activities (`record_goods_receipt`, `update_inventory`, `notify_requester`, `close_po`) the parent runs alongside payment; per-step delay via `BACKOFFICE_DELAY_SECONDS` (default 2s). Kept `mcp`-free so the sandbox re-import of the parent stays clean; referenced by function object.
 - **`ui.py`** — Temporal-only CLI. `submit <file>` starts a `PurchaseOrderWorkflow`; `list` shows running POs with `get_progress` and renders any pending `inputRequests` from the child trackers (still discovered by `WorkflowType = "TaskTrackerWorkflow"`), then signals `user_decision`. `_prompt_for` renders arbitrary multi-field schemas (optional fields skippable, enums validated).
-- **`gui.py`** — Temporal-only NiceGUI status board. Lists **all** `PurchaseOrderWorkflow`s (running + closed, newest first) via `list_workflows`; per PO, resolves the child task id from `get_progress` and shows the child's live `get_status`; auto-refreshes every `--refresh-seconds` (default 2s ≈ the server poll interval). Clicking an `input_required` status renders that task's pending question (from the child's `get_pending_input`) in a pane above the list; **Submit** signals `user_decision` (reject by choosing `reject` in the form), **Close** dismisses without answering. A submit pane (**Submit simple/large**) starts a PO from a sample with a randomized `invoice_id` + ±10% line amounts. Temporal-facing helpers (`fetch_po_rows`, `build_responses`, `submit_decision`, `randomize_invoice`, `start_po`) are factored out and unit-tested (`tests/test_gui.py`); rendering is verified manually.
+- **`gui.py`** — Temporal-only NiceGUI status board. Lists **all** `PurchaseOrderWorkflow`s (running + closed, newest first) via `list_workflows`; per PO, resolves the child task id from `get_progress` and shows the child's live `get_status`; auto-refreshes every `--refresh-seconds` (default 2s ≈ the server poll interval). Clicking an `input_required` status renders that task's pending question (from the child's `get_pending_input`) in a pane above the list; **Submit** signals `user_decision` (reject by choosing `reject` in the form), **Close** dismisses without answering. A submit pane (**Submit auto approved/simple/large**) starts a PO from a sample with a randomized `invoice_id` + ±10% line amounts. Temporal-facing helpers (`fetch_po_rows`, `build_responses`, `submit_decision`, `randomize_invoice`, `start_po`) are factored out and unit-tested (`tests/test_gui.py`); rendering is verified manually.
 
 **No elicitation callback, no concurrency hack.** Because v2 surfaces input as data in `tasks/get` and answers it via `tasks/update`, the old `_elicitation_handler`, `_active_elicitations`, `x-task-id` smuggling, and 20ms-raise workaround are all gone. HITL is just "store `inputRequests` → await a signal → `tasks/update`" inside the workflow.
 

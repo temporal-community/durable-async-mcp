@@ -15,6 +15,9 @@ from bizservice.activities import (
     validate_against_erp,
 )
 
+# Invoices at or below this total are approved without a human.
+AUTO_APPROVE_THRESHOLD = 500
+
 # Invoices above this total require a second human gate: cost-center coding.
 COST_CENTER_THRESHOLD = 5000
 
@@ -115,19 +118,26 @@ class InvoiceWorkflow:
             ),
         )
 
-        self.status = "PENDING-APPROVAL"
-        workflow.logger.info(
-            f"Waiting for approval for invoice {invoice.get('invoice_id')}"
-        )
-        # Wait for the approval signal
-        await workflow.wait_condition(
-            lambda: self.status != "PENDING-APPROVAL",
-            timeout=timedelta(days=5),
-        )
+        total = sum(line.get("amount", 0) for line in invoice.get("lines", []))
+        if total <= AUTO_APPROVE_THRESHOLD:
+            self.status = "APPROVED"
+            workflow.logger.info(
+                f"Invoice {invoice.get('invoice_id')} (${total}) auto-approved"
+            )
+        else:
+            self.status = "PENDING-APPROVAL"
+            workflow.logger.info(
+                f"Waiting for approval for invoice {invoice.get('invoice_id')}"
+            )
+            # Wait for the approval signal
+            await workflow.wait_condition(
+                lambda: self.status != "PENDING-APPROVAL",
+                timeout=timedelta(days=5),
+            )
 
-        if self.status == "REJECTED":
-            workflow.logger.info("REJECTED")
-            return "REJECTED"
+            if self.status == "REJECTED":
+                workflow.logger.info("REJECTED")
+                return "REJECTED"
 
         # Post the approved invoice to the ERP — a slow step the client polls through.
         self.status = "RECONCILING"
@@ -142,7 +152,6 @@ class InvoiceWorkflow:
         )
 
         # Large invoices need a second human gate: cost-center coding (data entry).
-        total = sum(line.get("amount", 0) for line in invoice.get("lines", []))
         if total > COST_CENTER_THRESHOLD:
             self.status = "PENDING-COST-CENTER"
             workflow.logger.info(

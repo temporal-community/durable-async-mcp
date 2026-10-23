@@ -81,7 +81,8 @@ Use `--address` to connect to a non-default Temporal server (default: `localhost
 
 ```
 INITIALIZING -> PENDING-VALIDATION -> PENDING-APPROVAL -> APPROVED -> RECONCILING ----------------+
-                                                       -> REJECTED                                |
+                                   |                   -> REJECTED   ^                            |
+                                   +-- (total <= $500) ---------------+                            |
                                                                                                   v
                               (total > $5000)  PENDING-COST-CENTER -> CODED ---> PAYING -> PAID / FAILED
                               (total <= $5000)  ----------------------------> PAYING -> PAID / FAILED
@@ -89,7 +90,8 @@ INITIALIZING -> PENDING-VALIDATION -> PENDING-APPROVAL -> APPROVED -> RECONCILIN
 
 ### InvoiceWorkflow
 
-Validates invoice, waits for approval (up to 5 days), posts to the ERP via the slow `reconcile_with_erp`
+Validates invoice; invoices at or below `AUTO_APPROVE_THRESHOLD` ($500) are approved automatically,
+others wait for approval (up to 5 days). It then posts to the ERP via the slow `reconcile_with_erp`
 step, then for invoices over `COST_CENTER_THRESHOLD` ($5000) takes a **second human gate**
 (cost-center coding) before processing line items in parallel via child workflows.
 

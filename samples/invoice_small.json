@@ -1,0 +1,8 @@
+{
+  "invoice_id": "INV-050",
+  "customer": "Initech",
+  "lines": [
+    {"description": "Office supplies", "amount": 100, "due_date": "2024-06-30T00:00:00Z"},
+    {"description": "Printer toner", "amount": 150, "due_date": "2024-07-05T00:00:00Z"}
+  ]
+}

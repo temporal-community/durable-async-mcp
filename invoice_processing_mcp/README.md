@@ -53,8 +53,9 @@ for the GUI. The MCP server is *not* run separately — the client worker launch
   child task's `user_decision` (to reject, choose `reject` in the form), and **Close** dismisses the
   pane without answering (the task stays `input_required`). Clicking a different `input_required` row
   swaps the pane;
-- has a submit pane below the list with **Submit simple** / **Submit large** buttons that start a
-  purchase order from `samples/invoice1.json` / `samples/invoice_large.json`, randomizing the
+- has a submit pane below the list with **Submit auto approved** / **Submit simple** / **Submit large** buttons that
+  start a purchase order from `samples/invoice_small.json` / `samples/invoice1.json` /
+  `samples/invoice_large.json` (no gates / approval only / both gates), randomizing the
   `invoice_id` (`INV-####`) and perturbing line amounts ±10% each time (so every submission is distinct
   while still hitting the same gates).
 
@@ -79,8 +80,8 @@ python -m invoice_processing_mcp.client.worker              # terminal 3 (auto-l
 python -m invoice_processing_mcp.client.ui                  # terminal 4 (or: python -m invoice_processing_mcp.client)
 ```
 
-Then in the UI: `submit samples/invoice_large.json` (both HITL gates) or `samples/invoice1.json`
-(approval gate only). The optional NiceGUI board is `python -m invoice_processing_mcp.client.gui`.
+Then in the UI: `submit samples/invoice_large.json` (both HITL gates) `samples/invoice1.json`
+(approval gate only), or `samples/invoice_small.json` (auto-approved, no HITL). The optional NiceGUI board is `python -m invoice_processing_mcp.client.gui`.
 
 ### Starting a client-side workflow
 
@@ -88,6 +89,7 @@ You start a workflow with the UI's **`submit <file>`** command — it kicks off 
 `PurchaseOrderWorkflow` (the parent orchestrator) for the given invoice JSON. Use `list` to watch its
 progress and to answer the human-in-the-loop gates. Pick a sample:
 
+- `samples/invoice_small.json` — $250, **auto-approved** (≤ $500): the task runs to `completed` with no human input.
 - `samples/invoice1.json` — $1000, hits the **approval** gate only.
 - `samples/invoice_large.json` — $12.5k, hits **both** gates (approval, then cost-center coding).
 

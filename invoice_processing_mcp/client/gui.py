@@ -18,6 +18,7 @@ from mcp_tasks_temporal.client import models
 from mcp_tasks_temporal.client.workflows import TaskTrackerWorkflow
 
 PO_WORKFLOW_TYPE = "PurchaseOrderWorkflow"
+AUTO_SAMPLE = "samples/invoice_small.json"
 SIMPLE_SAMPLE = "samples/invoice1.json"
 LARGE_SAMPLE = "samples/invoice_large.json"
 DEFAULT_REQUESTER = "buyer@acme.test"
@@ -26,8 +27,8 @@ DEFAULT_REQUESTER = "buyer@acme.test"
 def randomize_invoice(invoice: dict[str, Any]) -> dict[str, Any]:
     """A copy with a random INV-#### id and each line amount perturbed by up to ±10%.
 
-    The ±10% keeps the large sample comfortably over the cost-center threshold and the simple
-    sample under it, so which HITL gates fire is unchanged.
+    The ±10% keeps each sample on its side of the auto-approve and cost-center thresholds, so
+    which HITL gates fire (none, approval, or both) is unchanged.
     """
     inv = copy.deepcopy(invoice)
     inv["invoice_id"] = f"INV-{random.randint(0, 9999):04d}"
@@ -328,6 +329,7 @@ def index() -> None:
     with ui.card().classes("w-full"):
         ui.label("Submit a new purchase order").classes("font-medium")
         with ui.row():
+            ui.button("Submit auto approved", on_click=lambda: _submit_sample(AUTO_SAMPLE))
             ui.button("Submit simple", on_click=lambda: _submit_sample(SIMPLE_SAMPLE))
             ui.button("Submit large", on_click=lambda: _submit_sample(LARGE_SAMPLE))
     ui.timer(_refresh_seconds, _refresh_all)
